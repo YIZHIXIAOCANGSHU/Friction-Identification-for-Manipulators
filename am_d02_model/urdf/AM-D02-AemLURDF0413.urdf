@@ -1,0 +1,459 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-1-g15f4949  Build Version: 1.6.7594.29634
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="AM-D02-AemLURDF0413">
+  <link name="world"/>
+  <joint name="world_to_base" type="fixed">
+    <origin xyz="0 0 1.0" rpy="1.5707963 0 1.5707963" />
+    <parent link="world" />
+    <child link="base_link" />
+  </joint>
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="-3.96062265210911E-05 4.06405755801753E-05 0.0219123886665811"
+        rpy="0 0 0" />
+      <mass
+        value="0.98216803914715" />
+      <inertia
+        ixx="0.000725756580519763"
+        ixy="-1.43555878457085E-09"
+        ixz="-3.22948148251073E-08"
+        iyy="0.000726748054197442"
+        iyz="2.73395187624352E-08"
+        izz="0.00111141099741083" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="ArmLsecond_Link">
+    <inertial>
+      <origin
+        xyz="0.00308045637214737 4.16551354661815E-05 0.0792984361452382"
+        rpy="0 0 0" />
+      <mass
+        value="1.11350268318358" />
+      <inertia
+        ixx="0.00142873409838073"
+        ixy="3.28073252568116E-08"
+        ixz="2.94991759661844E-05"
+        iyy="0.000980518023676145"
+        iyz="1.80390235834406E-07"
+        izz="0.000824275233215819" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLsecond_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLsecond_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmLsecond_Joint"
+    type="revolute">
+    <origin
+      xyz="0 0 0.0555000000000001"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="ArmLsecond_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-0.75"
+      upper="0.75"
+      effort="40"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmLthird_Link">
+    <inertial>
+      <origin
+        xyz="-2.96588287707067E-06 -0.0431268231551466 -0.0168134725723825"
+        rpy="0 0 0" />
+      <mass
+        value="0.08043632042576" />
+      <inertia
+        ixx="6.69008329565981E-05"
+        ixy="-3.21111796386686E-09"
+        ixz="-4.01110083024006E-09"
+        iyy="3.43988273691369E-05"
+        iyz="2.02483617657847E-05"
+        izz="5.07555817342967E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLthird_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.862745098039216 0.505882352941176 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLthird_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmLthird_Joint"
+    type="revolute">
+    <origin
+      xyz="0.0327 0 0.085"
+      rpy="0 1.5708 0" />
+    <parent
+      link="ArmLsecond_Link" />
+    <child
+      link="ArmLthird_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.04"
+      effort="40"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmLfourth_Link">
+    <inertial>
+      <origin
+        xyz="0.00715841270326577 -0.000861469528049996 0.0830647191529006"
+        rpy="0 0 0" />
+      <mass
+        value="1.06693160034307" />
+      <inertia
+        ixx="0.00120483560589861"
+        ixy="-5.47651761566937E-06"
+        ixz="0.000124350671821778"
+        iyy="0.00130090232242023"
+        iyz="1.29354988674307E-06"
+        izz="0.000366918862739863" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLfourth_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLfourth_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmLfourth_Joint"
+    type="continuous">
+    <origin
+      xyz="0 -0.06625 -0.0341"
+      rpy="1.5708 -1.5708 0" />
+    <parent
+      link="ArmLthird_Link" />
+    <child
+      link="ArmLfourth_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.2"
+      upper="0.8"
+      effort="27"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmLfifth_Link">
+    <inertial>
+      <origin
+        xyz="0.0078530538692687 0.062153506702846 -0.0396430512961026"
+        rpy="0 0 0" />
+      <mass
+        value="0.472779085107902" />
+      <inertia
+        ixx="0.000383046636159055"
+        ixy="1.99380620927532E-05"
+        ixz="5.19681358249162E-06"
+        iyy="0.00016924356258232"
+        iyz="-2.32756439491972E-06"
+        izz="0.000405487576978861" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLfifth_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLfifth_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmLfifth_Joint"
+    type="revolute">
+    <origin
+      xyz="0.013843 -0.037999 0.15289"
+      rpy="1.5708 0 0.011055" />
+    <parent
+      link="ArmLfourth_Link" />
+    <child
+      link="ArmLfifth_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.09"
+      upper="1.57"
+      effort="27"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmLsixth_Link">
+    <inertial>
+      <origin
+        xyz="0.00105113381266358 0.000349454361812995 0.0664090932037668"
+        rpy="0 0 0" />
+      <mass
+        value="0.596839390455333" />
+      <inertia
+        ixx="0.000290972663469122"
+        ixy="-5.38140613366551E-07"
+        ixz="-7.09262691796454E-06"
+        iyy="0.000256537948659856"
+        iyz="-3.96726886881011E-07"
+        izz="0.000158187012658514" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLsixth_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLsixth_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmLsixth_Joint"
+    type="revolute">
+    <origin
+      xyz="0.0084105 0.09413 -0.039799"
+      rpy="-1.5708 -0.011055 0" />
+    <parent
+      link="ArmLfifth_Link" />
+    <child
+      link="ArmLsixth_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-0.8"
+      upper="0.8"
+      effort="7"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmLsixthoutput_Link">
+    <inertial>
+      <origin
+        xyz="0.000597044966583749 2.16222262766075E-05 -0.0351059201024274"
+        rpy="0 0 0" />
+      <mass
+        value="0.350184696857417" />
+      <inertia
+        ixx="0.000142344858384859"
+        ixy="-1.15691242160537E-08"
+        ixz="-7.25369050590821E-07"
+        iyy="0.000123795194557589"
+        iyz="-1.48320856349001E-08"
+        izz="0.000121896977325066" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLsixthoutput_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLsixthoutput_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmLsixthoutput_Joint"
+    type="revolute">
+    <origin
+      xyz="0.0364444491045691 0.000703587403396932 0.137000000000005"
+      rpy="-1.5707963267949 0 -1.55974177319404" />
+    <parent
+      link="ArmLsixth_Link" />
+    <child
+      link="ArmLsixthoutput_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.07"
+      upper="0.79"
+      effort="7"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmLseventh_Link">
+    <inertial>
+      <origin
+        xyz="-0.000233812383860062 0.0524032580401667 -0.0151437487400374"
+        rpy="0 0 0" />
+      <mass
+        value="0.130071892485594" />
+      <inertia
+        ixx="5.94029504039418E-05"
+        ixy="2.06868636253285E-08"
+        ixz="9.49755076418449E-09"
+        iyy="6.25209076446049E-05"
+        iyz="1.87131254819254E-06"
+        izz="5.85442427772894E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLseventh_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-D02-AemLURDF0413/meshes/ArmLseventh_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmLseventh_Joint"
+    type="revolute">
+    <origin
+      xyz="0.0205004890027136 -0.000738641908959226 -0.0357499999999988"
+      rpy="3.14159265358871 -1.55974177319403 0" />
+    <parent
+      link="ArmLsixthoutput_Link" />
+    <child
+      link="ArmLseventh_Link" />
+    <axis
+      xyz="0.0110543260730592 -0.000656056606246875 0.999938683852565" />
+    <limit
+      lower="-1.07"
+      upper="1.07"
+      effort="9"
+      velocity="0" />
+  </joint>
+</robot>

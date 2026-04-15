@@ -9,6 +9,10 @@
 ```
 
 它会自动检查 Python、安装依赖，并启动摩擦力辨识流程。
+默认会同时打开 MuJoCo 可视化和 Rerun 窗口。
+默认采集时长为 `30s`，运行过程中会输出采集与拟合进度。
+
+核心参数现在统一收口在 `friction_identification_core/config.py`。
 
 ## 这个项目现在保留了什么
 
@@ -33,8 +37,9 @@
 
 如果你希望看到可视化界面，还需要本机图形环境支持：
 
-- `--render` 会打开 MuJoCo 窗口
-- `--spawn-rerun` 会打开 Rerun 窗口
+- 默认会打开 MuJoCo 窗口
+- 默认会打开 Rerun 窗口
+- 如果不想打开，可以传 `--no-render` 或 `--no-spawn-rerun`
 
 ## 第一次使用
 
@@ -70,36 +75,40 @@ pip3 install -r requirements.txt
 1. 检查 `python3` 是否可用
 2. 安装或同步依赖
 3. 加载 OpenArm 的 MuJoCo 模型
-4. 生成激励轨迹并采集各关节摩擦相关力矩
-5. 拟合每个关节的库仑摩擦、粘性摩擦和偏置项
-6. 保存结果到 `results/`
+4. 默认拉起 MuJoCo 与 Rerun 可视化窗口
+5. 生成带关节限位保护的逐关节分段激励轨迹，并采集各关节摩擦相关力矩
+6. 拟合每个关节的库仑摩擦、粘性摩擦和偏置项
+7. 保存结果到 `results/`
 
 ## 常用命令
 
 最常用的几种运行方式如下。
 
-### 只运行辨识
+### 默认运行
 
 ```bash
 ./run.sh
 ```
 
-### 辨识时显示 MuJoCo 画面
+这条命令现在会默认同时打开 MuJoCo 和 Rerun。
+默认采集时长为 `30s`。
+
+### 只关闭 MuJoCo 窗口
 
 ```bash
-./run.sh --render
+./run.sh --no-render
 ```
 
-### 辨识结束后查看 Rerun 可视化
+### 只关闭 Rerun 窗口
 
 ```bash
-./run.sh --spawn-rerun
+./run.sh --no-spawn-rerun
 ```
 
-### 同时打开 MuJoCo 和 Rerun
+### 同时关闭两个窗口
 
 ```bash
-./run.sh --render --spawn-rerun
+./run.sh --no-render --no-spawn-rerun
 ```
 
 ### 调整采集时长或采样率
@@ -113,25 +122,46 @@ pip3 install -r requirements.txt
 `run.sh` 会把参数原样传给摩擦辨识主程序，常用参数有：
 
 - `--duration`
-  - 激励与采集总时长，单位秒
+  - 激励与采集总时长，单位秒，默认 `30`
 - `--sample-rate`
   - 记录频率，单位 Hz
 - `--base-frequency`
   - 激励轨迹的基频
 - `--amplitude-scale`
-  - 轨迹激励幅值缩放
+  - 逐关节分段激励时的关节摆幅缩放，实际摆幅会再受关节限位安全边界约束
 - `--feedback-scale`
   - 轨迹跟踪时的 PD 反馈比例
 - `--render`
-  - 打开 MuJoCo 可视化
+  - 打开 MuJoCo 可视化，默认开启
+- `--no-render`
+  - 关闭 MuJoCo 可视化
 - `--spawn-rerun`
-  - 打开 Rerun 可视化
+  - 打开 Rerun 可视化，默认开启
+- `--no-spawn-rerun`
+  - 关闭 Rerun 可视化
 
 查看帮助：
 
 ```bash
 ./run.sh --help
 ```
+
+如果你想直接修改默认参数，而不是每次通过命令行传参，优先改：
+
+```text
+friction_identification_core/config.py
+```
+
+这个文件里现在分成几组核心配置：
+
+- `RobotModelConfig`
+  - 关节名、关节限位、home 位姿、TCP 偏置、摩擦初值等
+- `CollectionConfig`
+  - 采集时长、采样率、基频、摆幅、反馈比例、可视化开关等
+- `SampleFilterConfig`
+  - 限位边界筛样阈值、约束力矩阈值、验证集抽样规则
+- `FitConfig`
+  - 摩擦拟合的速度尺度、正则化、Huber 参数、最小速度阈值
 
 ## 输出结果怎么看
 
@@ -158,11 +188,24 @@ pip3 install -r requirements.txt
 
 一般来说，满足下面几项就说明流程跑通了：
 
+- 终端能看到轨迹生成、采集进度、样本筛选、拟合进度等过程性输出
 - 终端出现 `Friction identification finished.`
 - `results/` 下生成了两个结果文件
 - 没有出现 `Failed to load MuJoCo` 或 Python 导入报错
 
-如果你启用了 `--render` 或 `--spawn-rerun`，还能看到对应窗口被正常拉起。
+默认情况下，你还能看到 MuJoCo 和 Rerun 对应窗口被正常拉起。
+
+## 关节限位如何参与采集轨迹
+
+工程里已经把 7 个关节的限位统一写入 `friction_identification_core/config.py` 的 `RobotModelConfig.joint_limits`，采集时会同时作用在正向仿真模型和逆动力学模型。
+
+当前轨迹生成策略是：
+
+- 先根据每个关节的上下限建立安全工作区，不直接贴着硬限位跑
+- 默认预留约 `10%` 行程、且限制在 `0.04rad` 到 `0.12rad` 之间的安全边界
+- 如果 `home` 位姿离某一侧限位太近，会把该关节的激励中心挪到安全区中点，保证正反两个方向都有足够运动量
+- 采集轨迹采用“逐关节分段激励”：每一段时间只重点激励一个关节，其余关节保持在各自安全中心位
+- 采样筛选时还会再剔除距离限位小于 `0.05rad` 的样本，避免限位附近的约束力矩污染摩擦辨识
 
 ## 项目结构
 
@@ -212,7 +255,7 @@ pip3 install -r requirements.txt
 那就需要本机有可用显示环境。没有图形环境时，可以先只运行：
 
 ```bash
-./run.sh
+./run.sh --no-render --no-spawn-rerun
 ```
 
 ### 4. 结果文件没有生成

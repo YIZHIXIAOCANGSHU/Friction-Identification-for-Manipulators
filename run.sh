@@ -18,8 +18,9 @@ Usage:
 
 Examples:
   ./run.sh
-  ./run.sh --render
-  ./run.sh --spawn-rerun --duration 24
+  ./run.sh --duration 24
+  ./run.sh --no-render
+  ./run.sh --no-spawn-rerun
 EOF
 }
 
