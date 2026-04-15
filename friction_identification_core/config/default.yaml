@@ -1,0 +1,127 @@
+# 机器人本体与模型相关配置
+robot:
+  # 相对项目根目录的 URDF 路径
+  urdf_path: "am_d02_model/urdf/AM-D02-AemLURDF0413.urdf"
+  # 参与摩擦辨识的关节名称，顺序需与后续所有按关节排列的数组保持一致
+  joint_names:
+    - "ArmLsecond_Joint"
+    - "ArmLthird_Joint"
+    - "ArmLfourth_Joint"
+    - "ArmLfifth_Joint"
+    - "ArmLsixth_Joint"
+    - "ArmLsixthoutput_Joint"
+    - "ArmLseventh_Joint"
+  # 各关节角度上下限，单位 rad，格式为 [min, max]
+  joint_limits:
+    - [-0.83, 0.829]
+    - [-0.819, 0.0]
+    - [-1.592, 1.681]
+    - [0.0, 1.523]
+    - [-1.428, 1.536]
+    - [-0.7384, 0.6513]
+    - [-0.8899, 1.622]
+  # 各关节力矩限制，单位 N*m
+  torque_limits: [40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0]
+  # 机器人回零姿态，单位 rad
+  home_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  # 在末端执行器坐标系上附加的 TCP 偏移，单位 m，格式为 [x, y, z]
+  tcp_offset: [0.0, 0.07, -0.03]
+  # MuJoCo/URDF 中作为末端执行器参考的 body 名称
+  end_effector_body: "tcp"
+
+# 仿真时使用的真实摩擦参数，用于生成带摩擦的数据
+simulation_friction:
+  # 库仑摩擦系数，按关节排列
+  coulomb: [0.12, 0.12, 0.10, 0.10, 0.08, 0.08, 0.08]
+  # 粘性摩擦系数，按关节排列
+  viscous: [0.45, 0.45, 0.38, 0.38, 0.28, 0.26, 0.28]
+
+# 摩擦辨识任务本身的配置
+identification:
+  # 目标辨识关节的索引，从 0 开始
+  target_joint: 5
+  # 激励轨迹参数
+  excitation:
+    # 激励时长，单位 s
+    duration: 30.0
+    # 基础频率，单位 Hz
+    base_frequency: 0.12
+    # 激励幅值缩放系数，越大关节运动幅度通常越大
+    amplitude_scale: 0.22
+  # 从 home 姿态过渡到激励起点时的限制
+  transition:
+    # 末端允许的最大速度，单位 m/s
+    max_ee_speed: 1.0
+    # 过渡阶段最短持续时间，单位 s
+    min_duration: 1.2
+    # 到位后的静置时间，单位 s
+    settle_duration: 0.25
+
+# 关节控制器参数
+controller:
+  # 各关节位置环比例增益
+  kp: [115.0, 100.0, 35.0, 40.0, 22.0, 20.0, 20.0]
+  # 各关节位置环微分增益
+  kd: [5.0, 5.0, 2.2, 2.0, 1.0, 1.0, 1.0]
+  # 反馈控制输出缩放系数，最终力矩约为 tau_ff + feedback_scale * tau_fb
+  feedback_scale: 0.2
+
+# 安全保护参数
+safety:
+  # 距离关节极限的安全裕量，单位 rad
+  joint_limit_margin: 0.087
+  # 是否对输出力矩做限幅保护
+  enable_torque_clamp: true
+
+# 采样与仿真步长配置
+sampling:
+  # 数据采样频率，单位 Hz
+  rate: 400.0
+  # 仿真/积分步长，单位 s
+  timestep: 0.0005
+
+# 摩擦参数拟合器配置
+fitting:
+  # 平滑符号函数的速度尺度，越小越接近 sign(v)
+  velocity_scale: 0.03
+  # 正则化系数，防止病态拟合
+  regularization: 1.0e-8
+  # 最大迭代次数
+  max_iterations: 16
+  # Huber 损失阈值，用于降低异常值影响
+  huber_delta: 1.35
+  # 低于该速度阈值的数据点可认为速度过小，单位 rad/s
+  min_velocity_threshold: 0.01
+
+# 串口采集配置
+serial:
+  # 硬件串口设备名
+  port: "/dev/ttyUSB0"
+  # 串口波特率
+  baudrate: 115200
+
+# 可视化与日志输出配置
+visualization:
+  # 是否打开本地渲染窗口
+  render: true
+  # 是否启动 rerun 可视化进程
+  spawn_rerun: true
+  # 渲染窗口刷新率
+  viewer_fps: 30.0
+  # rerun 每隔多少个采样点记录一次
+  rerun_log_stride: 1
+  # UART 文本日志打印间隔，单位为采样点数
+  uart_text_log_interval: 100
+
+# 结果文件输出配置
+output:
+  # 输出目录，相对项目根目录
+  results_dir: "results"
+  # 仿真结果文件名前缀
+  simulation_prefix: "friction_identification"
+  # 硬件原始采集结果文件名前缀
+  hardware_capture_prefix: "real_uart_capture"
+  # 硬件辨识结果文件名前缀
+  hardware_ident_prefix: "real_friction_identification"
+  # 汇总 JSON 文件名
+  summary_filename: "real_friction_identification_summary.json"

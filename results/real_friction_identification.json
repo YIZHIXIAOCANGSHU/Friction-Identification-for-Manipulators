@@ -1,0 +1,171 @@
+{
+  "source_capture": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/real_uart_capture.npz",
+  "sample_count": 1083,
+  "retained_samples": 1083,
+  "joint_names": [
+    "ArmLsecond_Joint",
+    "ArmLthird_Joint",
+    "ArmLfourth_Joint",
+    "ArmLfifth_Joint",
+    "ArmLsixth_Joint",
+    "ArmLsixthoutput_Joint",
+    "ArmLseventh_Joint"
+  ],
+  "identified_joint_names": [
+    "ArmLseventh_Joint"
+  ],
+  "identified_joint_indices": [
+    6
+  ],
+  "excitation_enabled_joint_mask": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    true
+  ],
+  "excitation_enabled_joint_indices": [
+    6
+  ],
+  "excitation_enabled_joint_names": [
+    "ArmLseventh_Joint"
+  ],
+  "joint_limits_rad": [
+    [
+      -0.83,
+      0.829
+    ],
+    [
+      -0.819,
+      0.0
+    ],
+    [
+      -1.592,
+      1.681
+    ],
+    [
+      0.0,
+      1.523
+    ],
+    [
+      -1.428,
+      1.536
+    ],
+    [
+      -0.7384,
+      0.6513
+    ],
+    [
+      -0.8899,
+      1.622
+    ]
+  ],
+  "excitation_filter_limits_rad": [
+    [
+      -0.6903736598404536,
+      0.6893736598404536
+    ],
+    [
+      -0.6793736598404536,
+      -0.13962634015954636
+    ],
+    [
+      -1.4523736598404537,
+      1.5413736598404537
+    ],
+    [
+      0.13962634015954636,
+      1.3833736598404536
+    ],
+    [
+      -1.2883736598404536,
+      1.3963736598404537
+    ],
+    [
+      -0.5987736598404536,
+      0.5116736598404537
+    ],
+    [
+      -0.7502736598404537,
+      1.4823736598404538
+    ]
+  ],
+  "estimated_coulomb": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.16902721683262406
+  ],
+  "estimated_viscous": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    3.823013718119841e-12
+  ],
+  "estimated_offset": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "estimated_coulomb_active": [
+    0.16902721683262406
+  ],
+  "estimated_viscous_active": [
+    3.823013718119841e-12
+  ],
+  "estimated_offset_active": [
+    0.0
+  ],
+  "velocity_scale": 0.03,
+  "train_rmse": [
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    0.4969628394548839
+  ],
+  "validation_rmse": [
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    0.50718274345403
+  ],
+  "train_r2": [
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    0.033664181208744925
+  ],
+  "validation_r2": [
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    NaN,
+    0.01584679396829758
+  ],
+  "mean_validation_rmse": 0.50718274345403,
+  "mean_validation_r2": 0.01584679396829758,
+  "tau_friction_estimation_note": "tau_friction_est = tau_measured - rigid_body_inverse_dynamics(q, qd, qdd)"
+}

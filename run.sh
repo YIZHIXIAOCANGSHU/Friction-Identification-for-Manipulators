@@ -18,10 +18,9 @@ Usage:
 
 Examples:
   ./run.sh
-  ./run.sh sim --duration 24
-  ./run.sh sim --no-render
+  ./run.sh sim --config friction_identification_core/config/default.yaml
   ./run.sh real
-  ./run.sh real --port /dev/ttyUSB0 --baudrate 115200
+  ./run.sh real --mode compensate
 EOF
 }
 
@@ -97,11 +96,11 @@ main() {
     if [ "$mode" = "sim" ]; then
         verify_core
         log_step "Launching friction identification (sim mode)"
-        python3 friction_identification_core/run_simulation.py "$@"
+        python3 -m friction_identification_core.cli.simulate "$@"
     elif [ "$mode" = "real" ]; then
         verify_real_dependencies
         log_step "Launching UART real mode"
-        python3 friction_identification_core/run_real_uart.py "$@"
+        python3 -m friction_identification_core.cli.deploy "$@"
     else
         log_error "Unknown mode: $mode"
     fi
