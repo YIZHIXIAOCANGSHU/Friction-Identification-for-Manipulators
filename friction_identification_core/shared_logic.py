@@ -20,6 +20,59 @@ class ReferenceTrajectory:
     qdd_cmd: np.ndarray
 
 
+def build_quintic_point_to_point_trajectory(
+    *,
+    start_q: np.ndarray,
+    goal_q: np.ndarray,
+    duration: float,
+    sample_rate: float,
+    settle_duration: float = 0.0,
+) -> ReferenceTrajectory:
+    """生成关节空间五次多项式点到点轨迹，保证起止速度和加速度连续。"""
+
+    start_q = np.asarray(start_q, dtype=np.float64).reshape(-1)
+    goal_q = np.asarray(goal_q, dtype=np.float64).reshape(-1)
+    if start_q.shape != goal_q.shape:
+        raise ValueError("start_q and goal_q must share the same shape.")
+
+    duration = max(float(duration), 1e-6)
+    sample_rate = max(float(sample_rate), 1e-6)
+    settle_duration = max(float(settle_duration), 0.0)
+    total_duration = duration + settle_duration
+    num_samples = max(int(round(total_duration * sample_rate)), 2)
+    t = np.linspace(0.0, total_duration, num_samples, endpoint=False)
+
+    delta = goal_q - start_q
+    q_cmd = np.empty((num_samples, start_q.size), dtype=np.float64)
+    qd_cmd = np.zeros_like(q_cmd)
+    qdd_cmd = np.zeros_like(q_cmd)
+
+    move_mask = t < duration
+    if np.any(move_mask):
+        tau = np.clip(t[move_mask] / duration, 0.0, 1.0)
+        tau2 = tau * tau
+        tau3 = tau2 * tau
+        tau4 = tau3 * tau
+        tau5 = tau4 * tau
+
+        blend = 10.0 * tau3 - 15.0 * tau4 + 6.0 * tau5
+        blend_d = (30.0 * tau2 - 60.0 * tau3 + 30.0 * tau4) / duration
+        blend_dd = (60.0 * tau - 180.0 * tau2 + 120.0 * tau3) / (duration * duration)
+
+        q_cmd[move_mask] = start_q + blend[:, None] * delta
+        qd_cmd[move_mask] = blend_d[:, None] * delta
+        qdd_cmd[move_mask] = blend_dd[:, None] * delta
+
+    hold_mask = ~move_mask
+    if np.any(hold_mask):
+        q_cmd[hold_mask] = goal_q
+
+    q_cmd[-1] = goal_q
+    qd_cmd[-1] = 0.0
+    qdd_cmd[-1] = 0.0
+    return ReferenceTrajectory(time=t, q_cmd=q_cmd, qd_cmd=qd_cmd, qdd_cmd=qdd_cmd)
+
+
 @dataclass(frozen=True)
 class JointExcitationPlan:
     """记录逐关节激励时使用的中心位与安全幅值。"""
@@ -174,14 +227,12 @@ def generate_segmented_excitation_trajectory(
     )
 
     num_joints = home_qpos.size
-    initial_q = np.zeros(num_joints, dtype=np.float64)
     q_cmd = np.broadcast_to(plan.centers, (num_samples, num_joints)).copy()
     qd_cmd = np.zeros_like(q_cmd)
     qdd_cmd = np.zeros_like(q_cmd)
 
-    transition_duration = min(1.0, max(0.0, 0.08 * float(duration)))
-    active_duration = max(float(duration) - transition_duration, 1.0 / float(sample_rate))
-    segment_edges = np.linspace(transition_duration, float(duration), num_joints + 1, dtype=np.float64)
+    active_duration = max(float(duration), 1.0 / float(sample_rate))
+    segment_edges = np.linspace(0.0, float(duration), num_joints + 1, dtype=np.float64)
     base_cycles = max(3.0, float(base_frequency) * active_duration)
 
     for joint_idx in range(num_joints):
@@ -217,12 +268,7 @@ def generate_segmented_excitation_trajectory(
 
         q_cmd[segment_mask, joint_idx] = plan.centers[joint_idx] + amplitude * pattern
 
-    transition_mask = t < transition_duration
-    if np.any(transition_mask):
-        normalized = np.clip(t[transition_mask] / max(transition_duration, 1e-6), 0.0, 1.0)
-        blend = normalized * normalized * (3.0 - 2.0 * normalized)
-        q_cmd[transition_mask] = initial_q + blend[:, None] * (plan.centers - initial_q)
-    q_cmd[0] = initial_q
+    q_cmd[0] = plan.centers
 
     if np.any(plan.limited):
         for joint_idx in range(num_joints):

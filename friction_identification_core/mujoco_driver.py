@@ -14,6 +14,7 @@ from .am_d02_scene import build_am_d02_model
 from .models import FrictionSampleBatch
 from .shared_logic import (
     ReferenceTrajectory,
+    build_quintic_point_to_point_trajectory,
     build_joint_excitation_plan,
     build_simulation_clean_sample_mask,
     find_joint_limit_violation,
@@ -46,6 +47,18 @@ class MujocoFrictionCollectionConfig:
     render: bool = False
     realtime: bool = False
     feedback_scale: float = 0.12
+
+
+@dataclass(frozen=True)
+class TrackingControlCommand:
+    """统一描述一次轨迹跟踪输出的力矩及其限位整形结果。"""
+
+    tau_command: np.ndarray
+    tau_feedforward: np.ndarray
+    tau_feedback: np.ndarray
+    raw_tau_command: np.ndarray
+    blocked_mask: np.ndarray
+    scale_factors: np.ndarray
 
 
 class MujocoFrictionCollector:
@@ -367,6 +380,55 @@ class MujocoFrictionCollector:
             amplitude_scale=amplitude_scale,
         )
 
+    def build_transition_reference(
+        self,
+        *,
+        start_q: np.ndarray,
+        goal_q: np.ndarray,
+        sample_rate: float,
+        max_ee_speed: float,
+        min_duration: float,
+        settle_duration: float,
+    ) -> tuple[ReferenceTrajectory, float]:
+        """根据当前姿态在线规划过渡段，并按末端速度目标自动拉长时间。"""
+
+        start_q = np.asarray(start_q, dtype=np.float64).reshape(-1)
+        goal_q = np.asarray(goal_q, dtype=np.float64).reshape(-1)
+        if start_q.shape != goal_q.shape:
+            raise ValueError("start_q and goal_q must share the same shape.")
+
+        max_ee_speed = max(float(max_ee_speed), 1e-6)
+        min_duration = max(float(min_duration), 1e-3)
+        settle_duration = max(float(settle_duration), 0.0)
+        displacement = float(np.linalg.norm(goal_q - start_q))
+
+        if displacement < 1e-6:
+            duration = min_duration
+        else:
+            unit_reference = build_quintic_point_to_point_trajectory(
+                start_q=start_q,
+                goal_q=goal_q,
+                duration=1.0,
+                sample_rate=sample_rate,
+                settle_duration=0.0,
+            )
+            ee_pos_unit, _ = self.evaluate_end_effector_trajectory(unit_reference.q_cmd)
+            if ee_pos_unit.shape[0] >= 2:
+                ee_speed_unit = np.linalg.norm(np.diff(ee_pos_unit, axis=0), axis=1) * float(sample_rate)
+                peak_ee_speed_unit = float(np.max(ee_speed_unit))
+            else:
+                peak_ee_speed_unit = 0.0
+            duration = max(min_duration, peak_ee_speed_unit / max_ee_speed)
+
+        reference = build_quintic_point_to_point_trajectory(
+            start_q=start_q,
+            goal_q=goal_q,
+            duration=duration,
+            sample_rate=sample_rate,
+            settle_duration=settle_duration,
+        )
+        return reference, float(duration)
+
     def generate_excitation_trajectory(
         self,
         *,
@@ -415,6 +477,35 @@ class MujocoFrictionCollector:
         mujoco.mj_inverse(self.inverse_model, self.inverse_data)
         tau = np.array(
             [self.inverse_data.qfrc_inverse[dof_addr] for dof_addr in self.dof_addrs],
+            dtype=np.float64,
+        )
+
+        self.inverse_data.qpos[:] = qpos_backup
+        self.inverse_data.qvel[:] = qvel_backup
+        self.inverse_data.qacc[:] = qacc_backup
+        mujoco.mj_forward(self.inverse_model, self.inverse_data)
+        return tau
+
+    def compute_bias_torque(
+        self,
+        *,
+        q_curr: np.ndarray,
+        qd_curr: np.ndarray,
+    ) -> np.ndarray:
+        """Return gravity plus velocity-dependent bias torque from the friction-free inverse model."""
+
+        qpos_backup = self.inverse_data.qpos.copy()
+        qvel_backup = self.inverse_data.qvel.copy()
+        qacc_backup = self.inverse_data.qacc.copy()
+
+        for qpos_addr, dof_addr, q_i, qd_i in zip(self.qpos_addrs, self.dof_addrs, q_curr, qd_curr):
+            self.inverse_data.qpos[qpos_addr] = q_i
+            self.inverse_data.qvel[dof_addr] = qd_i
+            self.inverse_data.qacc[dof_addr] = 0.0
+
+        mujoco.mj_forward(self.inverse_model, self.inverse_data)
+        tau = np.array(
+            [self.inverse_data.qfrc_bias[dof_addr] for dof_addr in self.dof_addrs],
             dtype=np.float64,
         )
 
@@ -490,6 +581,36 @@ class MujocoFrictionCollector:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Apply torque clipping and joint-limit-aware shaping to the tracking controller."""
 
+        command = self.compute_safe_tracking_command(
+            q_cmd=q_cmd,
+            qd_cmd=qd_cmd,
+            qdd_cmd=qdd_cmd,
+            q_curr=q_curr,
+            qd_curr=qd_curr,
+            feedback_scale=feedback_scale,
+        )
+        return (
+            command.tau_feedforward,
+            command.tau_feedback,
+            command.tau_command,
+        )
+
+    def compute_safe_tracking_command(
+        self,
+        *,
+        q_cmd: np.ndarray,
+        qd_cmd: np.ndarray,
+        qdd_cmd: np.ndarray,
+        q_curr: np.ndarray,
+        qd_curr: np.ndarray,
+        feedback_scale: float,
+        lower: Optional[np.ndarray] = None,
+        upper: Optional[np.ndarray] = None,
+        soft_margin: float = SIM_EXCITATION_SOFT_MARGIN_RAD,
+        recenter_torque_ratio: float = SIM_EXCITATION_RECENTER_TORQUE_RATIO,
+    ) -> TrackingControlCommand:
+        """共享仿真/真机的轨迹跟踪控制核心。"""
+
         tau_ff, tau_fb, tau_ctrl = self.compute_tracking_torque(
             q_cmd=q_cmd,
             qd_cmd=qd_cmd,
@@ -498,18 +619,30 @@ class MujocoFrictionCollector:
             qd_curr=qd_curr,
             feedback_scale=feedback_scale,
         )
-        tau_ctrl = np.clip(tau_ctrl, -self.torque_limits, self.torque_limits)
-        lower, upper = self._get_excitation_limits()
-        tau_ctrl, _, _ = shape_limit_aware_torque_command(
+        raw_tau_command = np.clip(tau_ctrl, -self.torque_limits, self.torque_limits)
+        if lower is None or upper is None:
+            lower, upper = self._get_excitation_limits()
+        else:
+            lower = np.asarray(lower, dtype=np.float64).reshape(-1)
+            upper = np.asarray(upper, dtype=np.float64).reshape(-1)
+
+        tau_command, blocked_mask, scale_factors = shape_limit_aware_torque_command(
             q=q_curr,
-            torque_command=tau_ctrl,
+            torque_command=raw_tau_command,
             torque_limits=self.torque_limits,
             lower=lower,
             upper=upper,
-            soft_margin=SIM_EXCITATION_SOFT_MARGIN_RAD,
-            recenter_torque_ratio=SIM_EXCITATION_RECENTER_TORQUE_RATIO,
+            soft_margin=soft_margin,
+            recenter_torque_ratio=recenter_torque_ratio,
         )
-        return tau_ff, tau_fb, tau_ctrl
+        return TrackingControlCommand(
+            tau_command=tau_command,
+            tau_feedforward=tau_ff,
+            tau_feedback=tau_fb,
+            raw_tau_command=raw_tau_command,
+            blocked_mask=blocked_mask,
+            scale_factors=scale_factors,
+        )
 
     def evaluate_end_effector_trajectory(self, q_traj: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Replay a joint trajectory to obtain its corresponding TCP path."""
@@ -603,7 +736,7 @@ class MujocoFrictionCollector:
         for sample_idx in range(num_samples):
             q_curr, qd_curr, _ = self._get_joint_state()
             self._raise_if_joint_limits_exceeded(q_curr)
-            tau_ff, _, tau_ctrl = self.compute_safe_tracking_torque(
+            command = self.compute_safe_tracking_command(
                 q_cmd=q_cmd[sample_idx],
                 qd_cmd=qd_cmd[sample_idx],
                 qdd_cmd=qdd_cmd[sample_idx],
@@ -611,7 +744,7 @@ class MujocoFrictionCollector:
                 qd_curr=qd_curr,
                 feedback_scale=feedback_scale,
             )
-            self._set_torque(tau_ctrl)
+            self._set_torque(command.tau_command)
 
             next_sample_time = (sample_idx + 1) * sample_dt
             # Step the simulator until the next logging instant is reached.
@@ -640,7 +773,7 @@ class MujocoFrictionCollector:
             qdd_log[sample_idx] = qdd_meas
             ee_pos_log[sample_idx] = ee_pos_meas
             ee_quat_log[sample_idx] = ee_quat_meas
-            tau_ctrl_log[sample_idx] = tau_ctrl
+            tau_ctrl_log[sample_idx] = command.tau_command
             tau_passive_log[sample_idx] = tau_passive
             tau_constraint_log[sample_idx] = tau_constraint
             tau_friction_log[sample_idx] = tau_friction

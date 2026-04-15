@@ -97,11 +97,11 @@ main() {
     if [ "$mode" = "sim" ]; then
         verify_core
         log_step "Launching friction identification (sim mode)"
-        python3 friction_identification_core/run_openarm_friction_identification.py "$@"
+        python3 friction_identification_core/run_simulation.py "$@"
     elif [ "$mode" = "real" ]; then
         verify_real_dependencies
         log_step "Launching UART real mode"
-        python3 friction_identification_core/run_real_uart_friction.py "$@"
+        python3 friction_identification_core/run_real_uart.py "$@"
     else
         log_error "Unknown mode: $mode"
     fi

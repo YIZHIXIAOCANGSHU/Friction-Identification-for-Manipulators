@@ -1,12 +1,15 @@
 {
   "control_mode": "collect",
+  "control_output_mode": "gravity_coriolis_compensation_only",
+  "send_enabled": false,
+  "send_bias_compensation_only": true,
   "collection_controller": "mujoco_reference_tracking",
   "collection_base_frequency": 0.12,
   "collection_amplitude_scale": 0.22,
   "collection_feedback_scale": 0.2,
-  "sample_count": 46,
-  "duration_s": 0.6655025139916688,
-  "termination_reason": "safety_stop: 检测到关节超限，已触发安全停机: ArmLsixth_Joint=-4.514009 rad, 安全限位=[-1.515266, 1.623266] (原始限位外扩 5.0 deg)",
+  "sample_count": 1136,
+  "duration_s": 41.97355524300656,
+  "termination_reason": "duration_reached",
   "excitation_filter_limits_rad": [
     [
       -0.6903736598404536,
@@ -37,10 +40,10 @@
       1.4823736598404538
     ]
   ],
-  "excitation_valid_samples": 0,
-  "excitation_blocked_samples": 46,
-  "mean_uart_cycle_hz": 360.66776394000686,
-  "max_uart_cycle_hz": 853.0312505884651,
-  "mean_uart_latency_ms": 14.465079478332369,
-  "mean_uart_transfer_kbps": 559.7563696348906
+  "excitation_valid_samples": 58,
+  "excitation_blocked_samples": 1078,
+  "mean_uart_cycle_hz": 45.04671874577137,
+  "max_uart_cycle_hz": 812.4381051931163,
+  "mean_uart_latency_ms": 36.94843248239791,
+  "mean_uart_transfer_kbps": 69.91250749343718
 }

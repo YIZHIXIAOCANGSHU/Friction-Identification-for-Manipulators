@@ -5,6 +5,7 @@ from .config import (
     CollectionConfig,
     FitConfig,
     FrictionIdentificationConfig,
+    RealUartConfig,
     RobotModelConfig,
     SampleFilterConfig,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "DEFAULT_FRICTION_CONFIG",
     "FitConfig",
     "FrictionIdentificationConfig",
+    "RealUartConfig",
     "RobotModelConfig",
     "SampleFilterConfig",
     "build_friction_regression_matrix",

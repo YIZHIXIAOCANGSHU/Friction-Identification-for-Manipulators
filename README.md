@@ -21,12 +21,24 @@
 这个模式现在默认是“真机采集辨识模式”：
 
 - 复用 MuJoCo 仿真中的参考轨迹与控制律，不做摩擦补偿
+- 仿真和真机现在统一走同一套控制核心：逆动力学前馈 + PD 反馈 + 力矩裁剪 + 限位整形
 - 实时接收 UART 反馈
 - 用接收到的 7 轴电机状态驱动 MuJoCo 仿真机械臂
 - 保存真实采集数据
 - 结束后基于真实数据自动做一次摩擦辨识
 
 如果任一接收关节位置超出 `friction_identification_core/config.py` 里的关节限位，程序会立即发送零力矩并触发安全停机。
+
+如果你只想接收状态和记录数据、不想真的向下位机发力矩，可以把 `friction_identification_core/config.py` 里的 `RealUartConfig.send_enabled` 改成 `False`。
+
+如果你想在 `collect` 模式下不发送完整激励、只向真机发送重力+科氏补偿，可以把 `RealUartConfig.send_bias_compensation_only` 改成 `True`。这个开关优先级低于 `send_enabled`：
+
+- `send_enabled=True`
+  - 发送完整激励
+- `send_enabled=False` 且 `send_bias_compensation_only=True`
+  - 只发送重力+科氏补偿
+- 两者都关
+  - 只接收、计算、记录，不发送
 
 核心参数现在统一收口在 `friction_identification_core/config.py`。
 
@@ -122,6 +134,7 @@ pip3 install -r requirements.txt
 ./run.sh real --duration 60
 ./run.sh real --no-render
 ./run.sh real --no-spawn-rerun
+./run.sh real --stop-at-excitation-start
 ./run.sh real --control-mode compensate
 ```
 
@@ -140,6 +153,14 @@ tau = fc * tanh(qd / velocity_scale) + fv * qd + offset
 ```
 
 计算 7 轴摩擦补偿力矩，再按 `[J1..J7]` 顺序发送给下位机。
+
+如果你只想让机械臂先运动到“预期的激励起始位置”，确认起点没问题后就停，可以加：
+
+```bash
+./run.sh real --stop-at-excitation-start
+```
+
+这个参数只对 `collect` 模式生效。程序会完成起步过渡和稳定保持，然后发送零力矩并退出，不进入后续激励段，也不会继续做真机摩擦辨识。
 
 ### 只关闭 MuJoCo 窗口
 
@@ -210,6 +231,11 @@ friction_identification_core/config.py
   - 限位边界筛样阈值、约束力矩阈值、验证集抽样规则
 - `FitConfig`
   - 摩擦拟合的速度尺度、正则化、Huber 参数、最小速度阈值
+- `RealUartConfig`
+  - 真机 UART 发送策略
+  - `send_enabled=True` 时发送完整激励
+  - `send_enabled=False` 且 `send_bias_compensation_only=True` 时，仅在 `collect` 模式发送重力+科氏补偿
+  - 两者都关时只接收、计算和记录，不执行串口发送
 
 ## 输出结果怎么看
 
@@ -267,6 +293,8 @@ friction_identification_core/config.py
 │   ├── models.py
 │   ├── mujoco_driver.py
 │   ├── rerun_reporter.py
+│   ├── run_simulation.py
+│   ├── run_real_uart.py
 │   └── run_openarm_friction_identification.py
 ├── openarm_mujoco/
 │   ├── scene_with_target_gripper.xml
@@ -315,7 +343,7 @@ pip3 install -r requirements.txt
 推荐阅读顺序：
 
 1. `run.sh`
-2. `friction_identification_core/run_openarm_friction_identification.py`
+2. `friction_identification_core/run_simulation.py`
 3. `friction_identification_core/mujoco_driver.py`
 4. `friction_identification_core/estimator.py`
 

@@ -83,6 +83,12 @@ class CollectionConfig:
     amplitude_scale: float = 0.22
     # 轨迹跟踪反馈比例；越大跟踪越紧，但也可能引入更强控制扰动。
     feedback_scale: float = 0.2
+    # 进入激励前，点到点过渡的目标末端最大速度，单位 m/s。
+    transition_max_ee_speed: float = 1.0
+    # 点到点过渡的最短持续时间，单位秒；用于避免起步过猛。
+    transition_min_duration: float = 1.2
+    # 到达激励起始姿态后额外保持的稳定时间，单位秒。
+    transition_settle_duration: float = 0.25
     # 是否打开 MuJoCo 实时渲染窗口。
     render: bool = True
     # 是否同时拉起 Rerun 可视化窗口。
@@ -135,6 +141,16 @@ class FitConfig:
 
 
 @dataclass
+class RealUartConfig:
+    """真机 UART 运行配置。"""
+
+    # 是否实际向下位机下发力矩；关闭后仅接收、计算并记录，不执行串口发送。
+    send_enabled: bool = False
+    # 仅在 send_enabled=False 且 collect 模式下生效：只向真机下发重力/科氏补偿，不发送完整激励。
+    send_bias_compensation_only: bool = True
+
+
+@dataclass
 class FrictionIdentificationConfig:
     """摩擦辨识总配置，统一收口各子模块参数。"""
 
@@ -148,6 +164,8 @@ class FrictionIdentificationConfig:
     sample_filter: SampleFilterConfig = field(default_factory=SampleFilterConfig)
     # 参数拟合器超参数。
     fit: FitConfig = field(default_factory=FitConfig)
+    # 真机 UART 运行配置。
+    real_uart: RealUartConfig = field(default_factory=RealUartConfig)
 
     def with_collection_overrides(
         self,
