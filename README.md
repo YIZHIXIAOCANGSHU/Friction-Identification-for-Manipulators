@@ -8,9 +8,17 @@
 ./run.sh
 ```
 
-它会自动检查 Python、安装依赖，并启动摩擦力辨识流程。
+它会自动检查 Python、安装依赖，并启动仿真摩擦辨识流程。
 默认会同时打开 MuJoCo 可视化和 Rerun 窗口。
 默认采集时长为 `30s`，运行过程中会输出采集与拟合进度。
+
+如果要切到真机串口模式：
+
+```bash
+./run.sh real
+```
+
+这个模式会按 `dm_motor_uart_rx_frame_t` 的模式1下发 7 轴力矩，并实时接收 UART 反馈、保存采集结果、在 Rerun 里显示关节状态、力矩、温度以及 UART 频率。
 
 核心参数现在统一收口在 `friction_identification_core/config.py`。
 
@@ -92,6 +100,29 @@ pip3 install -r requirements.txt
 
 这条命令现在会默认同时打开 MuJoCo 和 Rerun。
 默认采集时长为 `30s`。
+
+### 真实串口模式
+
+```bash
+./run.sh real
+```
+
+常用参数：
+
+```bash
+./run.sh real --port /dev/ttyUSB0 --baudrate 115200
+./run.sh real --duration 60
+./run.sh real --no-spawn-rerun
+```
+
+真实串口模式会读取 `results/friction_identification_summary.json` 里的当前辨识参数，按
+
+```text
+tau = fc * tanh(qd / velocity_scale) + fv * qd + offset
+```
+
+计算 7 轴摩擦补偿力矩，再按 `[J1..J7]` 顺序发送给下位机。
+采集结果会额外保存到 `results/real_uart_capture.npz` 和 `results/real_uart_capture.json`。
 
 ### 只关闭 MuJoCo 窗口
 

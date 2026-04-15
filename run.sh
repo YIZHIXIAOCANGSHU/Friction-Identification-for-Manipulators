@@ -14,13 +14,14 @@ NC='\033[0m'
 print_usage() {
     cat <<EOF
 Usage:
-  ./run.sh [friction-args]
+  ./run.sh [sim|real] [args]
 
 Examples:
   ./run.sh
-  ./run.sh --duration 24
-  ./run.sh --no-render
-  ./run.sh --no-spawn-rerun
+  ./run.sh sim --duration 24
+  ./run.sh sim --no-render
+  ./run.sh real
+  ./run.sh real --port /dev/ttyUSB0 --baudrate 115200
 EOF
 }
 
@@ -67,6 +68,15 @@ verify_core() {
     fi
 }
 
+verify_real_dependencies() {
+    log_step "Verifying real-mode dependencies"
+    if python3 -c "import numpy, serial" >/dev/null 2>&1; then
+        log_success "Real-mode dependencies loaded successfully"
+    else
+        log_error "Failed to load real-mode dependencies. Check pyserial/numpy installation."
+    fi
+}
+
 main() {
     case "${1:-}" in
         help|-h|--help)
@@ -75,13 +85,26 @@ main() {
             ;;
     esac
 
+    local mode="sim"
+    if [ "${1:-}" = "sim" ] || [ "${1:-}" = "real" ]; then
+        mode="$1"
+        shift
+    fi
+
     cd "$PROJECT_ROOT"
     check_python
     sync_dependencies
-    verify_core
-
-    log_step "Launching friction identification"
-    python3 friction_identification_core/run_openarm_friction_identification.py "$@"
+    if [ "$mode" = "sim" ]; then
+        verify_core
+        log_step "Launching friction identification (sim mode)"
+        python3 friction_identification_core/run_openarm_friction_identification.py "$@"
+    elif [ "$mode" = "real" ]; then
+        verify_real_dependencies
+        log_step "Launching UART real mode"
+        python3 friction_identification_core/run_real_uart_friction.py "$@"
+    else
+        log_error "Unknown mode: $mode"
+    fi
 }
 
 main "$@"
