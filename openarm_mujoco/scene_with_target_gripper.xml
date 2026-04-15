@@ -1,0 +1,88 @@
+<mujoco model="openarm_bimanual scene with target - gripper closed">
+  <!-- 包含双臂机器人模型定义 -->
+  <include file="openarm_bimanual_gripper.xml"/>
+
+  <!-- 场景统计信息，用于可视化和相机定位 -->
+  <statistic center="0 0 0.43" extent=".85" meansize="0.05"/>
+
+  <!-- 可视化设置 -->
+  <visual>
+    <!-- 头灯设置，提供基础照明 -->
+    <headlight diffuse="0.5 0.5 0.48" ambient="0.18 0.18 0.18" specular="0.03 0.03 0.03"/>
+    <!-- 雾效颜色设置 -->
+    <rgba haze="0.74 0.79 0.84 1"/>
+    <!-- 相机初始视角设置 -->
+    <global azimuth="160" elevation="-10"/>
+    <!-- 渲染质量设置，提高阴影质量 -->
+    <quality shadowsize="8192"/>
+  </visual>
+  
+  <!-- 默认选项：启用site坐标系可视化 -->
+  <option>
+    <flag gravity="enable"/>
+  </option>
+  
+  <!-- 默认site设置，用于坐标系可视化 -->
+  <default>
+    <site type="sphere" size="0.005" rgba="1 0 0 0.3"/>
+  </default>
+
+  <!-- 场景资源定义 -->
+  <asset>
+    <!-- 天空盒纹理，创建渐变背景 -->
+    <texture type="skybox" builtin="gradient" rgb1="0.78 0.82 0.87" rgb2="0.42 0.5 0.59" width="512" height="3072"/>
+    <!-- 地面纹理，使用棋盘格图案 -->
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.6 0.65 0.71" rgb2="0.5 0.55 0.61"
+      markrgb="0.76 0.8 0.85" width="300" height="300"/>
+    <!-- 地面材质，应用地面纹理 -->
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"
+      reflectance="0.01" shininess="0.01" specular="0.005"/>
+    <material name="studio_wall" rgba="0.67 0.72 0.78 1" reflectance="0.005" shininess="0.01" specular="0.002"/>
+    <material name="studio_panel" rgba="0.62 0.67 0.74 1" reflectance="0.008" shininess="0.02" specular="0.004"/>
+    <!-- 蓝色材质，用于目标方块 -->
+    <material name="target_blue" rgba="0.2 0.4 0.9 0.8" specular="0.5" shininess="0.3"/>
+  </asset>
+
+  <!-- 世界物体定义 -->
+  <worldbody>
+    <!-- 多光源摄影棚照明，保持环境更明亮同时保留层次 -->
+    <light name="key_light" pos="1.2 -1.0 2.6" dir="-0.35 0.2 -1" directional="true"
+      diffuse="0.64 0.62 0.58" ambient="0.06 0.06 0.06" specular="0.05 0.05 0.05" castshadow="true"/>
+    <light name="fill_light_left" pos="-1.6 -1.3 1.9" dir="0.55 0.3 -0.8" directional="true"
+      diffuse="0.28 0.31 0.35" ambient="0.015 0.015 0.015" specular="0.01 0.01 0.01" castshadow="false"/>
+    <light name="fill_light_right" pos="-1.4 1.3 2.0" dir="0.5 -0.25 -0.9" directional="true"
+      diffuse="0.3 0.33 0.38" ambient="0.015 0.015 0.015" specular="0.01 0.01 0.01" castshadow="false"/>
+    <light name="top_rim_light" pos="0 0 3.0" dir="0 0 -1" directional="true"
+      diffuse="0.16 0.18 0.2" ambient="0.008 0.008 0.008" specular="0.01 0.01 0.01" castshadow="false"/>
+    <!-- 地面几何体 -->
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    <geom name="backdrop_wall" type="box" pos="-1.25 0 1.05" size="0.03 1.8 1.05"
+      material="studio_wall" contype="0" conaffinity="0"/>
+    <geom name="left_wall" type="box" pos="0 -1.6 0.95" size="1.5 0.03 0.95"
+      material="studio_wall" contype="0" conaffinity="0"/>
+    <geom name="right_wall" type="box" pos="0 1.6 0.95" size="1.5 0.03 0.95"
+      material="studio_wall" contype="0" conaffinity="0"/>
+    <geom name="top_panel" type="box" pos="0 0 2.08" size="1.25 1.25 0.02"
+      material="studio_panel" contype="0" conaffinity="0"/>
+    
+    <!-- 蓝色目标方块 (可拖动, mocap类型不受物理力影响) -->
+    <body name="target_box" pos="0 0.1 1.0" quat="1 0 0 0" mocap="true">
+      <geom name="target_box_geom" type="box" size="0.025 0.025 0.025" 
+            material="target_blue" contype="0" conaffinity="0"/>
+      
+      <!-- 目标方块坐标系可视化 -->
+      <site name="target_frame" pos="0 0 0" size="0.008" rgba="1 1 1 0" group="0"/>
+      
+      <!-- 坐标轴可视化：X轴（红色）、Y轴（绿色）、Z轴（蓝色） -->
+      <site name="target_x_axis" type="cylinder" pos="0.035 0 0" size="0.002 0.035" 
+            quat="0.707 0 0.707 0" rgba="1 0 0 0.8" group="0"/>
+      <site name="target_y_axis" type="cylinder" pos="0 0.035 0" size="0.002 0.035" 
+            quat="0.707 -0.707 0 0" rgba="0 1 0 0.8" group="0"/>
+      <site name="target_z_axis" type="cylinder" pos="0 0 0.035" size="0.002 0.035" 
+            quat="1 0 0 0" rgba="0 0 1 0.8" group="0"/>
+      
+      <!-- 原有site用于获取方块位置 -->
+      <site name="target_site" pos="0 0 0" size="0.01" rgba="0 0 1 1" group="1"/>
+    </body>
+  </worldbody>
+</mujoco>
