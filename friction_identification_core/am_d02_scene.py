@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Build an augmented MuJoCo scene from the AM-D02 URDF description."""
+
 import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -12,6 +14,8 @@ _PI_HALF = "1.5707963"
 
 
 def _ensure_child(root: ET.Element, tag: str) -> ET.Element:
+    """Return an existing XML child or create it if missing."""
+
     node = root.find(tag)
     if node is None:
         node = ET.SubElement(root, tag)
@@ -26,6 +30,8 @@ def _add_axis_geom(
     half_length: float,
     color: str,
 ) -> None:
+    """Attach a colored axis cylinder to an MJCF body."""
+
     geom = ET.SubElement(parent, "geom")
     geom.set("type", "cylinder")
     geom.set("size", f"{radius} {half_length}")
@@ -53,6 +59,8 @@ def _add_mocap_marker(
     axis_radius: float,
     axis_half_length: float,
 ) -> None:
+    """Add a mocap marker body used to visualize target poses in MuJoCo."""
+
     body = ET.SubElement(worldbody, "body")
     body.set("name", body_name)
     body.set("pos", "0 0 0")
@@ -72,6 +80,8 @@ def _add_mocap_marker(
 
 
 def _attach_tcp_body(worldbody: ET.Element, tcp_offset: np.ndarray) -> None:
+    """Attach a visible TCP helper body to the URDF's terminal link."""
+
     for body in worldbody.iter("body"):
         if body.get("name") != "ArmLseventh_Link":
             continue
@@ -88,6 +98,8 @@ def _attach_tcp_body(worldbody: ET.Element, tcp_offset: np.ndarray) -> None:
 
 
 def _normalize_mesh_paths(root: ET.Element) -> None:
+    """Convert package-style URDF mesh paths to filenames MuJoCo can resolve."""
+
     for mesh in root.findall(".//mesh"):
         filename = mesh.get("filename")
         if filename and filename.startswith("package://"):
@@ -95,6 +107,8 @@ def _normalize_mesh_paths(root: ET.Element) -> None:
 
 
 def _augment_scene(root: ET.Element, tcp_offset: np.ndarray) -> None:
+    """Inject lights, floor, markers, and TCP helpers into the exported MJCF."""
+
     asset = _ensure_child(root, "asset")
 
     grid_texture = ET.SubElement(asset, "texture")
@@ -154,6 +168,8 @@ def _augment_scene(root: ET.Element, tcp_offset: np.ndarray) -> None:
 
 
 def build_am_d02_model(urdf_path: str | Path, tcp_offset: np.ndarray) -> mujoco.MjModel:
+    """Load the URDF, augment the generated MJCF, and return a MuJoCo model."""
+
     urdf_path = Path(urdf_path).resolve()
     mesh_dir = urdf_path.parent.parent / "meshes"
     resolved_urdf_path = urdf_path.parent / "_resolved_model.urdf"
@@ -167,6 +183,7 @@ def build_am_d02_model(urdf_path: str | Path, tcp_offset: np.ndarray) -> mujoco.
     compiler.set("meshdir", os.path.relpath(mesh_dir, urdf_path.parent))
     _normalize_mesh_paths(root)
 
+    # First load the URDF into a plain MuJoCo model so we can export valid MJCF.
     tree.write(resolved_urdf_path, encoding="utf-8", xml_declaration=True)
     try:
         basic_model = mujoco.MjModel.from_xml_path(str(resolved_urdf_path))
@@ -176,6 +193,7 @@ def build_am_d02_model(urdf_path: str | Path, tcp_offset: np.ndarray) -> mujoco.
         except OSError:
             pass
 
+    # Then reopen the saved MJCF and inject visualization-only helpers.
     try:
         mujoco.mj_saveLastXML(str(enhanced_xml_path), basic_model)
         tree = ET.parse(enhanced_xml_path)

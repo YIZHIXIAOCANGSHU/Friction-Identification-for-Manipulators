@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Offline Rerun reporting for simulated friction identification experiments."""
+
 from pathlib import Path
 from typing import Sequence
 
@@ -10,11 +12,15 @@ from .models import FrictionIdentificationResult, FrictionSampleBatch, TrackingE
 
 
 class FrictionRerunReporter:
+    """Publish fitting and tracking summaries for one identification run."""
+
     def __init__(self, *, app_name: str = "Friction Identification", spawn: bool = True):
         self.app_name = app_name
         self.spawn = spawn
 
     def init(self) -> None:
+        """Initialize Rerun and send the static dashboard blueprint."""
+
         rr.init(self.app_name, spawn=self.spawn)
 
         for axis_name, color in zip(("x", "y", "z"), ([230, 90, 70], [80, 190, 90], [70, 120, 230])):
@@ -90,6 +96,8 @@ class FrictionRerunReporter:
         tracking_results: Sequence[TrackingEvaluationResult],
         output_dir: Path,
     ) -> None:
+        """Log the full raw trajectory, fit result, and tracking comparison."""
+
         rr.log(
             "trajectory_3d/expected_path",
             rr.LineStrips3D([raw_batch.ee_pos_cmd], colors=[[80, 220, 120]], radii=[0.002]),
@@ -179,6 +187,7 @@ class FrictionRerunReporter:
                 rr.BarChart([tracking_result.ee_position_rmse for tracking_result in tracking_results]),
             )
 
+        # Build one markdown summary so the most important metrics are readable at a glance.
         lines = [
             "# Friction Identification Summary",
             "",
@@ -220,4 +229,6 @@ class FrictionRerunReporter:
         rr.log("summary/report", rr.TextDocument("\n".join(lines), media_type="text/markdown"))
 
     def close(self) -> None:
+        """Disconnect from the Rerun SDK."""
+
         rr.disconnect()

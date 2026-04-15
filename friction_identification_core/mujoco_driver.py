@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""MuJoCo 采集层，复用共享核心逻辑完成激励生成、跟踪和日志记录。"""
+
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -10,10 +12,32 @@ import numpy as np
 
 from .am_d02_scene import build_am_d02_model
 from .models import FrictionSampleBatch
+from .shared_logic import (
+    ReferenceTrajectory,
+    build_joint_excitation_plan,
+    build_simulation_clean_sample_mask,
+    find_joint_limit_violation,
+    generate_segmented_excitation_trajectory,
+    shape_limit_aware_torque_command,
+    shrink_joint_limit_window,
+)
+
+
+class MujocoSafetyLimitExceeded(RuntimeError):
+    """Raised when the MuJoCo state leaves the configured joint-safety envelope."""
+
+    pass
+
+
+SIM_EXCITATION_LIMIT_MARGIN_RAD = np.deg2rad(8.0)
+SIM_EXCITATION_SOFT_MARGIN_RAD = np.deg2rad(18.0)
+SIM_EXCITATION_RECENTER_TORQUE_RATIO = 0.16
 
 
 @dataclass
 class MujocoFrictionCollectionConfig:
+    """High-level knobs for one MuJoCo excitation and logging run."""
+
     duration: float = 30.0
     sample_rate: float = 400.0
     timestep: float = 0.0005
@@ -25,6 +49,8 @@ class MujocoFrictionCollectionConfig:
 
 
 class MujocoFrictionCollector:
+    """负责 MuJoCo 执行层，核心轨迹与筛样规则由共享模块提供。"""
+
     def __init__(
         self,
         model_path: str,
@@ -36,6 +62,7 @@ class MujocoFrictionCollector:
         home_qpos: Optional[np.ndarray] = None,
         end_effector_body: Optional[str] = None,
         tcp_offset: Optional[np.ndarray] = None,
+        torque_limits: Optional[np.ndarray] = None,
         joint_limit_overrides: Optional[np.ndarray] = None,
         friction_loss: Optional[np.ndarray] = None,
         damping: Optional[np.ndarray] = None,
@@ -53,6 +80,7 @@ class MujocoFrictionCollector:
         self.joint_names = list(joint_names)
         self.actuator_names = list(actuator_names or [])
         self.home_qpos = None if home_qpos is None else np.asarray(home_qpos, dtype=np.float64).copy()
+        self.torque_limits = None if torque_limits is None else np.asarray(torque_limits, dtype=np.float64).reshape(-1)
         self.joint_ids = []
         self.dof_addrs = []
         self.qpos_addrs = []
@@ -76,6 +104,10 @@ class MujocoFrictionCollector:
         self.dof_addrs = np.asarray(self.dof_addrs, dtype=np.int32)
         self.qpos_addrs = np.asarray(self.qpos_addrs, dtype=np.int32)
         self.actuator_ids = np.asarray(self.actuator_ids, dtype=np.int32)
+        if self.torque_limits is None:
+            self.torque_limits = np.full(len(self.joint_ids), np.inf, dtype=np.float64)
+        elif self.torque_limits.size != len(self.joint_ids):
+            raise ValueError("torque_limits size must match the number of joints.")
         self.ee_body_id = -1
         if end_effector_body is not None:
             self.ee_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, end_effector_body)
@@ -102,6 +134,8 @@ class MujocoFrictionCollector:
 
     @staticmethod
     def _load_model(model_path: str, tcp_offset: Optional[np.ndarray]) -> mujoco.MjModel:
+        """Load either a URDF-backed robot or a ready-made MuJoCo XML scene."""
+
         if model_path.lower().endswith(".urdf"):
             if tcp_offset is None:
                 raise ValueError("tcp_offset is required when loading a URDF model.")
@@ -122,6 +156,8 @@ class MujocoFrictionCollector:
         percent_step: int = 10,
         extra: str = "",
     ) -> int:
+        """Emit coarse progress logs without flooding the console."""
+
         if total <= 0:
             return last_reported_percent
 
@@ -142,6 +178,8 @@ class MujocoFrictionCollector:
         return percent
 
     def _apply_joint_limit_overrides(self, joint_limit_overrides: np.ndarray) -> None:
+        """Overwrite joint limits in both forward and inverse MuJoCo models."""
+
         joint_limit_overrides = np.asarray(joint_limit_overrides, dtype=np.float64)
         if joint_limit_overrides.shape != (len(self.joint_ids), 2):
             raise ValueError("joint_limit_overrides must have shape [num_joints, 2].")
@@ -182,6 +220,8 @@ class MujocoFrictionCollector:
         friction_loss: Optional[np.ndarray],
         damping: Optional[np.ndarray],
     ) -> None:
+        """Write friction-related parameters into the selected MuJoCo model."""
+
         if friction_loss is not None:
             friction_loss = np.asarray(friction_loss, dtype=np.float64).reshape(-1)
             if friction_loss.size != len(self.dof_addrs):
@@ -194,6 +234,8 @@ class MujocoFrictionCollector:
             model.dof_damping[self.dof_addrs] = damping
 
     def _get_home_joint_positions(self) -> np.ndarray:
+        """Resolve the preferred home pose from config, keyframe, or joint centers."""
+
         if self.home_qpos is not None:
             return self.home_qpos.copy()
 
@@ -206,11 +248,15 @@ class MujocoFrictionCollector:
         return centers.astype(np.float64)
 
     def get_true_friction_parameters(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the simulation model's ground-truth friction parameters."""
+
         coulomb = np.array([self.model.dof_frictionloss[addr] for addr in self.dof_addrs], dtype=np.float64)
         viscous = np.array([self.model.dof_damping[addr] for addr in self.dof_addrs], dtype=np.float64)
         return coulomb, viscous
 
     def get_controller_friction_parameters(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the inverse model parameters currently used for feedforward control."""
+
         coulomb = np.array(
             [self.inverse_model.dof_frictionloss[addr] for addr in self.dof_addrs],
             dtype=np.float64,
@@ -227,12 +273,16 @@ class MujocoFrictionCollector:
         friction_loss: Optional[np.ndarray],
         damping: Optional[np.ndarray],
     ) -> None:
+        """Update the inverse-dynamics controller's friction parameters."""
+
         self._apply_inverse_friction_overrides(
             friction_loss=friction_loss,
             damping=damping,
         )
 
     def _get_joint_limits(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return per-joint lower/upper bounds and a valid-limit mask."""
+
         lower = np.full(len(self.joint_ids), -np.inf, dtype=np.float64)
         upper = np.full(len(self.joint_ids), np.inf, dtype=np.float64)
         limited = np.zeros(len(self.joint_ids), dtype=bool)
@@ -245,56 +295,77 @@ class MujocoFrictionCollector:
             limited[idx] = True
         return lower, upper, limited
 
+    def _get_excitation_limits(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return a conservative working window inside the hard joint limits."""
+
+        lower, upper, limited = self._get_joint_limits()
+        margin = SIM_EXCITATION_LIMIT_MARGIN_RAD
+        if np.any(limited):
+            finite_span = upper[limited] - lower[limited]
+            if finite_span.size > 0:
+                margin = min(float(margin), 0.49 * float(np.min(finite_span)))
+        return shrink_joint_limit_window(
+            lower,
+            upper,
+            limited,
+            margin=margin,
+            keep_midpoint_inside=True,
+        )
+
+    def _raise_if_joint_limits_exceeded(self, q: np.ndarray) -> None:
+        """Abort the current run once the measured state crosses a hard limit."""
+
+        violation_message = find_joint_limit_violation(
+            q=q,
+            joint_names=self.joint_names,
+            joint_limits=np.column_stack(self._get_joint_limits()[:2]),
+            margin=0.0,
+        )
+        if violation_message is not None:
+            raise MujocoSafetyLimitExceeded(violation_message)
+
     def _build_joint_excitation_plan(
         self,
         *,
         amplitude_scale: float,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Choose a safe excitation center and amplitude for every joint."""
+
         lower, upper, limited = self._get_joint_limits()
-        home = self._get_home_joint_positions()
-        num_joints = len(self.joint_ids)
+        plan = build_joint_excitation_plan(
+            home_qpos=self._get_home_joint_positions(),
+            joint_limits=np.column_stack((lower, upper)),
+            limited=limited,
+            amplitude_scale=amplitude_scale,
+        )
+        return (
+            plan.centers.copy(),
+            plan.amplitudes.copy(),
+            plan.safe_lower.copy(),
+            plan.safe_upper.copy(),
+            plan.limited.copy(),
+        )
 
-        centers = home.copy()
-        amplitudes = np.full(num_joints, 0.08, dtype=np.float64)
-        safe_lower = lower.copy()
-        safe_upper = upper.copy()
+    def build_excitation_reference(
+        self,
+        *,
+        duration: float,
+        sample_rate: float,
+        base_frequency: float,
+        amplitude_scale: float,
+    ) -> ReferenceTrajectory:
+        """Build the shared excitation reference used by both simulation and real runs."""
 
-        for joint_idx in range(num_joints):
-            center = home[joint_idx]
-            if limited[joint_idx]:
-                span = upper[joint_idx] - lower[joint_idx]
-                margin = float(np.clip(0.10 * span, 0.04, 0.12))
-                safe_lo = lower[joint_idx] + margin
-                safe_hi = upper[joint_idx] - margin
-                if safe_lo >= safe_hi:
-                    safe_lo = lower[joint_idx] + 0.2 * span
-                    safe_hi = upper[joint_idx] - 0.2 * span
-
-                center = float(np.clip(center, safe_lo, safe_hi))
-                max_excursion = max(0.0, min(center - safe_lo, safe_hi - center))
-
-                # If the home pose sits too close to one side, move to the
-                # safe-range midpoint so the active segment excites both motion
-                # directions and avoids grazing the joint limits.
-                desired_span = max(0.06, min(0.18, 0.22 * span))
-                if max_excursion < desired_span:
-                    center = 0.5 * (safe_lo + safe_hi)
-                    max_excursion = max(0.0, min(center - safe_lo, safe_hi - center))
-
-                max_excursion = max(max_excursion, 0.02)
-                amplitude = min(amplitude_scale * span, 0.78 * max_excursion, 0.32 * span)
-                amplitude = max(amplitude, min(0.03, 0.40 * max_excursion))
-                safe_lower[joint_idx] = safe_lo
-                safe_upper[joint_idx] = safe_hi
-            else:
-                max_excursion = 0.18
-                amplitude = min(amplitude_scale * 0.5, max_excursion)
-                amplitude = max(amplitude, 0.03)
-
-            centers[joint_idx] = center
-            amplitudes[joint_idx] = amplitude
-
-        return centers, amplitudes, safe_lower, safe_upper, limited
+        lower, upper, limited = self._get_joint_limits()
+        return generate_segmented_excitation_trajectory(
+            home_qpos=self._get_home_joint_positions(),
+            joint_limits=np.column_stack((lower, upper)),
+            limited=limited,
+            duration=duration,
+            sample_rate=sample_rate,
+            base_frequency=base_frequency,
+            amplitude_scale=amplitude_scale,
+        )
 
     def generate_excitation_trajectory(
         self,
@@ -304,65 +375,24 @@ class MujocoFrictionCollector:
         base_frequency: float,
         amplitude_scale: float,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        num_samples = max(int(round(duration * sample_rate)), 2)
-        t = np.linspace(0.0, duration, num_samples, endpoint=False)
-        num_joints = len(self.joint_ids)
-        centers, amplitudes, safe_lower, safe_upper, limited = self._build_joint_excitation_plan(
-            amplitude_scale=amplitude_scale
+        """Generate a segmented reference motion that excites joints one by one."""
+
+        reference = self.build_excitation_reference(
+            duration=duration,
+            sample_rate=sample_rate,
+            base_frequency=base_frequency,
+            amplitude_scale=amplitude_scale,
         )
-        q_cmd = np.broadcast_to(centers, (num_samples, num_joints)).copy()
-        qd_cmd = np.zeros_like(q_cmd)
-        qdd_cmd = np.zeros_like(q_cmd)
-
-        segment_edges = np.linspace(0.0, duration, num_joints + 1, dtype=np.float64)
-        base_cycles = max(3.0, base_frequency * duration)
-
-        for joint_idx in range(num_joints):
-            seg_start = segment_edges[joint_idx]
-            seg_end = segment_edges[joint_idx + 1]
-            segment_mask = (t >= seg_start) & (t < seg_end if joint_idx < num_joints - 1 else t <= seg_end)
-            if not np.any(segment_mask):
-                continue
-
-            local_t = t[segment_mask] - seg_start
-            segment_duration = max(seg_end - seg_start, 1e-6)
-            normalized_t = local_t / segment_duration
-            envelope = np.sin(np.pi * normalized_t) ** 2
-
-            cycles = base_cycles * (1.0 + 0.05 * joint_idx)
-            omega = 2.0 * np.pi * cycles / segment_duration
-            harmonic_ratio = 2.1
-            phase_shift = 0.35 * joint_idx
-            pattern = envelope * (
-                np.sin(omega * local_t)
-                + 0.28 * np.sin(harmonic_ratio * omega * local_t + phase_shift)
-            )
-
-            amplitude = amplitudes[joint_idx]
-            if limited[joint_idx]:
-                max_excursion = min(
-                    centers[joint_idx] - safe_lower[joint_idx],
-                    safe_upper[joint_idx] - centers[joint_idx],
-                )
-                peak = float(np.max(np.abs(pattern)))
-                if peak > 1e-9:
-                    amplitude = min(amplitude, 0.98 * max_excursion / peak)
-
-            q_cmd[segment_mask, joint_idx] = centers[joint_idx] + amplitude * pattern
-
-        lower, upper, _ = self._get_joint_limits()
-        if np.any(limited):
-            for joint_idx in range(num_joints):
-                if limited[joint_idx]:
-                    np.clip(q_cmd[:, joint_idx], lower[joint_idx], upper[joint_idx], out=q_cmd[:, joint_idx])
-
-        gradient_order = 2 if num_samples >= 3 else 1
-        qd_cmd[:] = np.gradient(q_cmd, 1.0 / sample_rate, axis=0, edge_order=gradient_order)
-        qdd_cmd[:] = np.gradient(qd_cmd, 1.0 / sample_rate, axis=0, edge_order=gradient_order)
-
-        return t, q_cmd, qd_cmd, qdd_cmd
+        return (
+            reference.time.copy(),
+            reference.q_cmd.copy(),
+            reference.qd_cmd.copy(),
+            reference.qdd_cmd.copy(),
+        )
 
     def reset(self, q_init: np.ndarray) -> None:
+        """Reset the forward simulation to a specific initial joint configuration."""
+
         mujoco.mj_resetData(self.model, self.data)
         self.data.ctrl[:] = 0.0
         self.data.qfrc_applied[:] = 0.0
@@ -371,6 +401,8 @@ class MujocoFrictionCollector:
         mujoco.mj_forward(self.model, self.data)
 
     def _inverse_dynamics(self, q: np.ndarray, qd: np.ndarray, qdd: np.ndarray) -> np.ndarray:
+        """Evaluate inverse dynamics without disturbing the current sim state."""
+
         qpos_backup = self.inverse_data.qpos.copy()
         qvel_backup = self.inverse_data.qvel.copy()
         qacc_backup = self.inverse_data.qacc.copy()
@@ -393,12 +425,16 @@ class MujocoFrictionCollector:
         return tau
 
     def _get_joint_state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Read measured joint position, velocity, and acceleration from MuJoCo."""
+
         q = np.array([self.data.qpos[addr] for addr in self.qpos_addrs], dtype=np.float64)
         qd = np.array([self.data.qvel[addr] for addr in self.dof_addrs], dtype=np.float64)
         qdd = np.array([self.data.qacc[addr] for addr in self.dof_addrs], dtype=np.float64)
         return q, qd, qdd
 
     def _get_ee_pose(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the current end-effector pose if configured."""
+
         if self.ee_body_id < 0:
             return np.zeros(3, dtype=np.float64), np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         return (
@@ -407,11 +443,15 @@ class MujocoFrictionCollector:
         )
 
     def _get_friction_components(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Split passive and constraint torques for later sample filtering."""
+
         tau_passive = -np.array([self.data.qfrc_passive[addr] for addr in self.dof_addrs], dtype=np.float64)
         tau_constraint = -np.array([self.data.qfrc_constraint[addr] for addr in self.dof_addrs], dtype=np.float64)
         return tau_passive, tau_constraint, tau_passive + tau_constraint
 
     def _set_torque(self, tau: np.ndarray) -> None:
+        """Apply joint torque through actuators or directly through qfrc_applied."""
+
         if self.actuator_ids.size > 0:
             self.data.ctrl[:] = 0.0
             for actuator_id, torque in zip(self.actuator_ids, tau):
@@ -421,7 +461,59 @@ class MujocoFrictionCollector:
         self.data.qfrc_applied[:] = 0.0
         self.data.qfrc_applied[self.dof_addrs] = tau
 
+    def compute_tracking_torque(
+        self,
+        *,
+        q_cmd: np.ndarray,
+        qd_cmd: np.ndarray,
+        qdd_cmd: np.ndarray,
+        q_curr: np.ndarray,
+        qd_curr: np.ndarray,
+        feedback_scale: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Combine inverse-dynamics feedforward and PD feedback torque."""
+
+        tau_ff = self._inverse_dynamics(q_cmd, qd_cmd, qdd_cmd)
+        tau_fb = self.kp * (q_cmd - q_curr) + self.kd * (qd_cmd - qd_curr)
+        tau_ctrl = tau_ff + feedback_scale * tau_fb
+        return tau_ff, tau_fb, tau_ctrl
+
+    def compute_safe_tracking_torque(
+        self,
+        *,
+        q_cmd: np.ndarray,
+        qd_cmd: np.ndarray,
+        qdd_cmd: np.ndarray,
+        q_curr: np.ndarray,
+        qd_curr: np.ndarray,
+        feedback_scale: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Apply torque clipping and joint-limit-aware shaping to the tracking controller."""
+
+        tau_ff, tau_fb, tau_ctrl = self.compute_tracking_torque(
+            q_cmd=q_cmd,
+            qd_cmd=qd_cmd,
+            qdd_cmd=qdd_cmd,
+            q_curr=q_curr,
+            qd_curr=qd_curr,
+            feedback_scale=feedback_scale,
+        )
+        tau_ctrl = np.clip(tau_ctrl, -self.torque_limits, self.torque_limits)
+        lower, upper = self._get_excitation_limits()
+        tau_ctrl, _, _ = shape_limit_aware_torque_command(
+            q=q_curr,
+            torque_command=tau_ctrl,
+            torque_limits=self.torque_limits,
+            lower=lower,
+            upper=upper,
+            soft_margin=SIM_EXCITATION_SOFT_MARGIN_RAD,
+            recenter_torque_ratio=SIM_EXCITATION_RECENTER_TORQUE_RATIO,
+        )
+        return tau_ff, tau_fb, tau_ctrl
+
     def evaluate_end_effector_trajectory(self, q_traj: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Replay a joint trajectory to obtain its corresponding TCP path."""
+
         num_samples = q_traj.shape[0]
         ee_pos = np.zeros((num_samples, 3), dtype=np.float64)
         ee_quat = np.zeros((num_samples, 4), dtype=np.float64)
@@ -467,6 +559,8 @@ class MujocoFrictionCollector:
         feedback_scale: float,
         realtime: bool,
     ) -> FrictionSampleBatch:
+        """Track a reference trajectory and log the resulting simulation signals."""
+
         num_samples = q_cmd.shape[0]
         self.reset(q_cmd[0])
 
@@ -508,12 +602,19 @@ class MujocoFrictionCollector:
 
         for sample_idx in range(num_samples):
             q_curr, qd_curr, _ = self._get_joint_state()
-            tau_ff = self._inverse_dynamics(q_cmd[sample_idx], qd_cmd[sample_idx], qdd_cmd[sample_idx])
-            tau_fb = self.kp * (q_cmd[sample_idx] - q_curr) + self.kd * (qd_cmd[sample_idx] - qd_curr)
-            tau_ctrl = tau_ff + feedback_scale * tau_fb
+            self._raise_if_joint_limits_exceeded(q_curr)
+            tau_ff, _, tau_ctrl = self.compute_safe_tracking_torque(
+                q_cmd=q_cmd[sample_idx],
+                qd_cmd=qd_cmd[sample_idx],
+                qdd_cmd=qdd_cmd[sample_idx],
+                q_curr=q_curr,
+                qd_curr=qd_curr,
+                feedback_scale=feedback_scale,
+            )
             self._set_torque(tau_ctrl)
 
             next_sample_time = (sample_idx + 1) * sample_dt
+            # Step the simulator until the next logging instant is reached.
             while sim_time + 1e-12 < next_sample_time:
                 mujoco.mj_step(self.model, self.data)
                 sim_time += self.model.opt.timestep
@@ -525,6 +626,11 @@ class MujocoFrictionCollector:
                         time.sleep(sim_time - elapsed)
 
             q_meas, qd_meas, qdd_meas = self._get_joint_state()
+            try:
+                self._raise_if_joint_limits_exceeded(q_meas)
+            except MujocoSafetyLimitExceeded:
+                self._set_torque(np.zeros(len(self.dof_addrs), dtype=np.float64))
+                raise
             ee_pos_meas, ee_quat_meas = self._get_ee_pose()
             tau_passive, tau_constraint, tau_friction = self._get_friction_components()
 
@@ -577,26 +683,24 @@ class MujocoFrictionCollector:
         limit_margin: float = 0.05,
         constraint_tolerance: float = 0.35,
     ) -> np.ndarray:
-        lower, upper, limited = self._get_joint_limits()
-        if np.any(limited):
-            lower = lower[None, :]
-            upper = upper[None, :]
-            margin_to_limits = np.minimum(batch.q - lower, upper - batch.q)
-            margin_to_limits[:, ~limited] = np.inf
-            away_from_limits = np.all(margin_to_limits > limit_margin, axis=1)
-        else:
-            away_from_limits = np.ones(batch.time.shape[0], dtype=bool)
+        """Filter out samples near joint limits, constraints, or near-zero motion."""
 
-        constraint_is_clean = np.all(np.abs(batch.tau_constraint) < constraint_tolerance, axis=1)
-        finite = (
-            np.all(np.isfinite(batch.q), axis=1)
-            & np.all(np.isfinite(batch.qd), axis=1)
-            & np.all(np.isfinite(batch.tau_friction), axis=1)
+        lower, upper, limited = self._get_joint_limits()
+        return build_simulation_clean_sample_mask(
+            q=batch.q,
+            qd=batch.qd,
+            tau_constraint=batch.tau_constraint,
+            tau_friction=batch.tau_friction,
+            lower=lower,
+            upper=upper,
+            limited=limited,
+            limit_margin=limit_margin,
+            constraint_tolerance=constraint_tolerance,
         )
-        moving = np.any(np.abs(batch.qd) > 0.02, axis=1)
-        return away_from_limits & constraint_is_clean & finite & moving
 
     def run_openarm_collection(self, config: MujocoFrictionCollectionConfig) -> FrictionSampleBatch:
+        """Generate a default excitation trajectory and immediately collect it."""
+
         self._print_status(
             "Generating segmented joint excitation trajectory "
             f"(duration={config.duration:.1f}s, base_frequency={config.base_frequency:.3f}Hz, "
@@ -632,6 +736,8 @@ class MujocoFrictionCollector:
         ee_pos_cmd: Optional[np.ndarray] = None,
         ee_quat_cmd: Optional[np.ndarray] = None,
     ) -> FrictionSampleBatch:
+        """Track a provided reference trajectory and align its logged timestamps."""
+
         if ee_pos_cmd is None or ee_quat_cmd is None:
             ee_pos_cmd, ee_quat_cmd = self.evaluate_end_effector_trajectory(q_cmd)
 
@@ -655,6 +761,8 @@ class MujocoFrictionCollector:
         return batch
 
     def close(self) -> None:
+        """Close the optional passive MuJoCo viewer."""
+
         if self.viewer is not None:
             self.viewer.close()
             self.viewer = None

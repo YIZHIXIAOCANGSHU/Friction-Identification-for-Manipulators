@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Realtime Rerun dashboards for live UART collection and compensation runs."""
+
 from typing import Sequence
 
 import numpy as np
@@ -8,14 +10,19 @@ import rerun.blueprint as rrb
 
 
 class RealTimeRerunReporter:
+    """Publish live joint, torque, temperature, and UART diagnostics to Rerun."""
+
     def __init__(self, *, app_name: str, joint_names: Sequence[str], spawn: bool = True) -> None:
         self.app_name = app_name
         self.spawn = spawn
         self.joint_names = list(joint_names)
 
     def init(self) -> None:
+        """Initialize Rerun streams and send the dashboard layout."""
+
         rr.init(self.app_name, spawn=self.spawn)
 
+        # Keep one consistent color per joint across all plots.
         joint_colors = [
             [230, 50, 50],
             [230, 140, 30],
@@ -165,6 +172,8 @@ class RealTimeRerunReporter:
         rx_text: str | None,
         tx_text: str | None,
     ) -> None:
+        """Append one completed 7-axis UART cycle to the live dashboard."""
+
         rr.set_time_seconds("time", float(elapsed_s))
         rr.set_time_sequence("step", int(step_index))
 
@@ -195,4 +204,6 @@ class RealTimeRerunReporter:
             rr.log("uart_log", rr.TextLog(f"[{step_index}] RX {rx_text}\n[{step_index}] TX {tx_text}"))
 
     def close(self) -> None:
+        """Disconnect from the Rerun SDK."""
+
         rr.disconnect()

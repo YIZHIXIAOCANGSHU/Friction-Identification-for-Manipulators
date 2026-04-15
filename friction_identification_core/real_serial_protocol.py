@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+"""UART frame packing and incremental parsing helpers for the real robot."""
+
 import struct
 from dataclasses import dataclass
 
 import numpy as np
 
 
+# Lower controller -> PC feedback frame layout.
 RECV_FRAME_HEAD = 0xA5
 RECV_FRAME_FORMAT = "<BBBfffff"
 RECV_FRAME_STRUCT = struct.Struct(RECV_FRAME_FORMAT)
 RECV_FRAME_SIZE = RECV_FRAME_STRUCT.size
 
+# PC -> lower controller torque command frame layout.
 SEND_FRAME_HEAD = b"\xAA\x55"
 SEND_FRAME_TAIL = b"\x55\xAA"
 SEND_PAYLOAD_STRUCT = struct.Struct("<7f")
@@ -19,6 +23,8 @@ SEND_FRAME_SIZE = SEND_FRAME_STRUCT.size
 
 
 def calculate_xor_checksum(data: bytes) -> int:
+    """Compute the 8-bit XOR checksum expected by the UART protocol."""
+
     checksum = 0
     for byte in data:
         checksum ^= byte
@@ -27,6 +33,8 @@ def calculate_xor_checksum(data: bytes) -> int:
 
 @dataclass(frozen=True)
 class JointFeedbackFrame:
+    """Decoded state feedback for one motor in the 7-axis chain."""
+
     motor_id: int
     state: int
     position: float
@@ -44,6 +52,8 @@ class TorqueCommandFramePacker:
         self._checksum_offset = 2 + SEND_PAYLOAD_STRUCT.size
 
     def pack(self, torque_command: np.ndarray) -> bytes:
+        """Pack seven torque commands into one outbound mode-1 UART frame."""
+
         torques = np.asarray(torque_command, dtype=np.float32).reshape(-1)
         if torques.size != 7:
             raise ValueError("torque_command must contain exactly 7 floats.")
@@ -62,6 +72,8 @@ class SerialFrameReader:
         self._buffer = bytearray()
 
     def read_available(self, ser) -> int:
+        """Pull all currently buffered bytes from the serial device."""
+
         bytes_waiting = ser.in_waiting
         if bytes_waiting <= 0:
             return 0
@@ -74,12 +86,15 @@ class SerialFrameReader:
         return len(self._buffer) >= RECV_FRAME_SIZE
 
     def pop_frame(self) -> JointFeedbackFrame | None:
+        """Extract the next complete feedback frame if one is available."""
+
         while True:
             if len(self._buffer) < RECV_FRAME_SIZE:
                 return None
 
             head_index = self._buffer.find(RECV_FRAME_HEAD)
             if head_index < 0:
+                # No valid header remains in the buffer, so resynchronize from scratch.
                 self._buffer.clear()
                 return None
             if head_index > 0:

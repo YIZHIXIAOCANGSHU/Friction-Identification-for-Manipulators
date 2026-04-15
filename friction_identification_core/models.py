@@ -1,3 +1,5 @@
+"""Shared data containers used across simulation, fitting, and reporting."""
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -6,6 +8,8 @@ import numpy as np
 
 @dataclass
 class JointFrictionParameters:
+    """Identified friction coefficients for one joint."""
+
     coulomb: float
     viscous: float
     offset: float = 0.0
@@ -14,6 +18,8 @@ class JointFrictionParameters:
 
 @dataclass
 class FrictionSampleBatch:
+    """Time-aligned batch of joint, torque, and end-effector samples."""
+
     time: np.ndarray
     q: np.ndarray
     qd: np.ndarray
@@ -31,6 +37,8 @@ class FrictionSampleBatch:
     tau_friction: np.ndarray
 
     def subset(self, mask: np.ndarray) -> "FrictionSampleBatch":
+        """Return a filtered view of the batch using a 1D boolean mask."""
+
         mask = np.asarray(mask, dtype=bool).reshape(-1)
         return FrictionSampleBatch(
             time=self.time[mask],
@@ -53,6 +61,8 @@ class FrictionSampleBatch:
 
 @dataclass
 class FrictionIdentificationResult:
+    """Per-joint fitting outputs together with train/validation diagnostics."""
+
     joint_names: list[str]
     parameters: list[JointFrictionParameters]
     predicted_torque: np.ndarray
@@ -69,6 +79,8 @@ class FrictionIdentificationResult:
 
 @dataclass
 class TrackingEvaluationResult:
+    """Summary of how one controller parameter set tracks a reference motion."""
+
     label: str
     batch: FrictionSampleBatch
     controller_coulomb: np.ndarray

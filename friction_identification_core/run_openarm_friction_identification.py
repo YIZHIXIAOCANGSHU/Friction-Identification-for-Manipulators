@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+"""End-to-end MuJoCo friction identification entry point for AM-D02."""
+
 import argparse
 import json
 import sys
@@ -16,11 +18,17 @@ if str(PROJECT_ROOT) not in sys.path:
 from friction_identification_core.config import DEFAULT_FRICTION_CONFIG, FrictionIdentificationConfig
 from friction_identification_core.estimator import fit_multijoint_friction
 from friction_identification_core.models import FrictionSampleBatch, TrackingEvaluationResult
-from friction_identification_core.mujoco_driver import MujocoFrictionCollectionConfig, MujocoFrictionCollector
+from friction_identification_core.mujoco_driver import (
+    MujocoFrictionCollectionConfig,
+    MujocoFrictionCollector,
+    MujocoSafetyLimitExceeded,
+)
 from friction_identification_core.rerun_reporter import FrictionRerunReporter
 
 
 def parse_args(default_config: FrictionIdentificationConfig) -> argparse.Namespace:
+    """Parse CLI overrides for the reusable MuJoCo identification pipeline."""
+
     collection = default_config.collection
     parser = argparse.ArgumentParser(description="Run reusable MuJoCo friction identification for AM-D02.")
     parser.add_argument("--duration", type=float, default=collection.duration, help="Excitation duration in seconds.")
@@ -59,6 +67,8 @@ def parse_args(default_config: FrictionIdentificationConfig) -> argparse.Namespa
 
 
 def log_info(message: str) -> None:
+    """Emit a flushed info log line."""
+
     print(f"[INFO] {message}", flush=True)
 
 
@@ -69,6 +79,8 @@ def build_tracking_evaluation(
     controller_coulomb: np.ndarray,
     controller_viscous: np.ndarray,
 ) -> TrackingEvaluationResult:
+    """Summarize trajectory-tracking quality for one controller setup."""
+
     joint_error = batch.q - batch.q_cmd
     ee_error = batch.ee_pos - batch.ee_pos_cmd
     joint_rmse = np.sqrt(np.mean(joint_error ** 2, axis=0))
@@ -90,6 +102,8 @@ def build_tracking_evaluation(
 
 
 def serialize_tracking_evaluation(result: TrackingEvaluationResult) -> dict[str, object]:
+    """Convert a tracking summary into JSON-friendly primitives."""
+
     return {
         "label": result.label,
         "controller_coulomb": result.controller_coulomb.tolist(),
@@ -107,6 +121,8 @@ def choose_tracking_winner(
     true_result: TrackingEvaluationResult,
     identified_result: TrackingEvaluationResult,
 ) -> str:
+    """Pick the better tracking run using EE RMSE then joint RMSE as tiebreakers."""
+
     tolerance = 1e-9
     if identified_result.ee_position_rmse + tolerance < true_result.ee_position_rmse:
         return identified_result.label
@@ -121,6 +137,8 @@ def choose_tracking_winner(
 
 
 def main() -> None:
+    """Run simulation collection, friction fitting, comparison, and result export."""
+
     base_config = DEFAULT_FRICTION_CONFIG
     args = parse_args(base_config)
     app_config = base_config.with_collection_overrides(
@@ -157,6 +175,7 @@ def main() -> None:
         home_qpos=model_config.home_qpos,
         end_effector_body=model_config.end_effector_body,
         tcp_offset=model_config.tcp_offset,
+        torque_limits=model_config.torque_limits,
         joint_limit_overrides=model_config.joint_limits,
         friction_loss=model_config.friction_loss,
         damping=model_config.damping,
@@ -181,9 +200,11 @@ def main() -> None:
     )
 
     try:
+        # 1) Generate and execute the excitation trajectory in MuJoCo.
         raw_batch = collector.run_openarm_collection(config)
         log_info(f"Raw collection completed with {raw_batch.time.shape[0]} samples")
 
+        # 2) Remove contaminated samples before parameter fitting.
         log_info("Filtering clean samples away from joint limits and constraint spikes")
         clean_mask = collector.build_clean_sample_mask(
             raw_batch,
@@ -208,6 +229,7 @@ def main() -> None:
             f"(train={train_count}, validation={validation_count})"
         )
 
+        # 3) Fit per-joint friction models against the filtered torque residuals.
         result = fit_multijoint_friction(
             velocity=batch.qd,
             torque=batch.tau_friction,
@@ -243,6 +265,7 @@ def main() -> None:
             friction_loss=estimated_coulomb,
             damping=estimated_viscous,
         )
+        # Replay the identical reference so only controller friction differs.
         tracking_identified_batch = collector.run_reference_trajectory(
             q_cmd=raw_batch.q_cmd,
             qd_cmd=raw_batch.qd_cmd,
@@ -279,6 +302,7 @@ def main() -> None:
             output_dir=output_dir,
         )
 
+        # Persist both a human-readable summary and the raw arrays for later analysis.
         summary = {
             "joint_names": result.joint_names,
             "joint_limits_rad": model_config.joint_limits.tolist(),
@@ -383,6 +407,10 @@ def main() -> None:
                 f"fv={params.viscous:.4f} (true {fv_true:.4f}), "
                 f"val_rmse={rmse:.6f}"
             )
+    except MujocoSafetyLimitExceeded as exc:
+        log_info(f"Simulation safety stop: {exc}")
+        print(f"Simulation safety stop: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
     finally:
         reporter.close()
         collector.close()

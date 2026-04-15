@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+"""Project-wide defaults for robot model, data collection, and fitting."""
+
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 
 
+# Resolve resources relative to the repository root so scripts can run from anywhere.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 

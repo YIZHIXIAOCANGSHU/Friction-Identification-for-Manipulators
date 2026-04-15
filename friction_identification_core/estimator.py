@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Robust least-squares estimators for joint friction identification."""
+
 from typing import Callable, Iterable, Optional
 
 import numpy as np
@@ -9,6 +11,8 @@ from .models import FrictionIdentificationResult, JointFrictionParameters
 
 
 def smooth_sign(velocity: np.ndarray, velocity_scale: float) -> np.ndarray:
+    """Smooth sign approximation used for the Coulomb friction term."""
+
     scale = max(float(velocity_scale), 1e-6)
     return np.tanh(np.asarray(velocity, dtype=np.float64) / scale)
 
@@ -18,6 +22,8 @@ def build_friction_regression_matrix(
     velocity_scale: float = 0.02,
     include_offset: bool = True,
 ) -> np.ndarray:
+    """Build [sign(v), v, 1] regression features for one joint."""
+
     velocity = np.asarray(velocity, dtype=np.float64).reshape(-1)
     columns = [smooth_sign(velocity, velocity_scale), velocity]
     if include_offset:
@@ -29,6 +35,8 @@ def predict_friction_torque(
     velocity: np.ndarray,
     parameters: JointFrictionParameters,
 ) -> np.ndarray:
+    """Predict one joint's friction torque from velocity and fitted parameters."""
+
     regressor = build_friction_regression_matrix(
         velocity=velocity,
         velocity_scale=parameters.velocity_scale,
@@ -48,6 +56,8 @@ def _solve_weighted_regularized_ls(
     regularization: float,
     bounds: Optional[tuple[np.ndarray, np.ndarray]] = None,
 ) -> np.ndarray:
+    """Solve a weighted regularized least-squares system with optional bounds."""
+
     weights = np.clip(np.asarray(weights, dtype=np.float64).reshape(-1), 1e-8, None)
     sqrt_w = np.sqrt(weights)[:, None]
     design_w = design * sqrt_w
@@ -72,6 +82,8 @@ def _solve_weighted_regularized_ls(
 
 
 def _build_huber_weights(residual: np.ndarray, huber_delta: float) -> np.ndarray:
+    """Down-weight outliers using a MAD-scaled Huber scheme."""
+
     residual = np.asarray(residual, dtype=np.float64)
     median = np.median(residual)
     mad = np.median(np.abs(residual - median))
@@ -81,6 +93,8 @@ def _build_huber_weights(residual: np.ndarray, huber_delta: float) -> np.ndarray
 
 
 def _build_balance_weights(velocity: np.ndarray) -> np.ndarray:
+    """Balance samples so one motion direction does not dominate the fit."""
+
     velocity = np.asarray(velocity, dtype=np.float64).reshape(-1)
     weights = np.ones_like(velocity)
     positive = velocity > 0.0
@@ -108,12 +122,16 @@ def _build_balance_weights(velocity: np.ndarray) -> np.ndarray:
 
 
 def _compute_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Compute RMSE while gracefully handling empty inputs."""
+
     if y_true.size == 0:
         return float("nan")
     return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
 
 
 def _compute_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Compute the coefficient of determination for one joint."""
+
     if y_true.size == 0:
         return float("nan")
     residual = np.sum((y_true - y_pred) ** 2)
@@ -135,6 +153,8 @@ def fit_joint_friction(
     include_offset: bool = True,
     nonnegative: bool = True,
 ) -> JointFrictionParameters:
+    """Fit Coulomb/viscous/(optional offset) friction terms for one joint."""
+
     velocity = np.asarray(velocity, dtype=np.float64).reshape(-1)
     torque = np.asarray(torque, dtype=np.float64).reshape(-1)
     valid = np.isfinite(velocity) & np.isfinite(torque)
@@ -211,6 +231,8 @@ def fit_multijoint_friction(
     true_viscous: Optional[np.ndarray] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> FrictionIdentificationResult:
+    """Fit an independent friction model for each joint in a trajectory batch."""
+
     velocity = np.asarray(velocity, dtype=np.float64)
     torque = np.asarray(torque, dtype=np.float64)
     if velocity.shape != torque.shape or velocity.ndim != 2:

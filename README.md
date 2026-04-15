@@ -18,7 +18,15 @@
 ./run.sh real
 ```
 
-这个模式会按 `dm_motor_uart_rx_frame_t` 的模式1下发 7 轴力矩，并实时接收 UART 反馈、保存采集结果、在 Rerun 里显示关节状态、力矩、温度以及 UART 频率。
+这个模式现在默认是“真机采集辨识模式”：
+
+- 复用 MuJoCo 仿真中的参考轨迹与控制律，不做摩擦补偿
+- 实时接收 UART 反馈
+- 用接收到的 7 轴电机状态驱动 MuJoCo 仿真机械臂
+- 保存真实采集数据
+- 结束后基于真实数据自动做一次摩擦辨识
+
+如果任一接收关节位置超出 `friction_identification_core/config.py` 里的关节限位，程序会立即发送零力矩并触发安全停机。
 
 核心参数现在统一收口在 `friction_identification_core/config.py`。
 
@@ -84,7 +92,7 @@ pip3 install -r requirements.txt
 2. 安装或同步依赖
 3. 加载 OpenArm 的 MuJoCo 模型
 4. 默认拉起 MuJoCo 与 Rerun 可视化窗口
-5. 生成带关节限位保护的逐关节分段激励轨迹，并采集各关节摩擦相关力矩
+5. 生成带关节限位保护的逐关节分段激励轨迹，并在仿真控制环中额外执行力矩裁剪、限位附近力矩衰减与越界停机，再采集各关节摩擦相关力矩
 6. 拟合每个关节的库仑摩擦、粘性摩擦和偏置项
 7. 保存结果到 `results/`
 
@@ -112,17 +120,26 @@ pip3 install -r requirements.txt
 ```bash
 ./run.sh real --port /dev/ttyUSB0 --baudrate 115200
 ./run.sh real --duration 60
+./run.sh real --no-render
 ./run.sh real --no-spawn-rerun
+./run.sh real --control-mode compensate
 ```
 
-真实串口模式会读取 `results/friction_identification_summary.json` 里的当前辨识参数，按
+默认的 `collect` 模式会复用仿真中的逐关节参考轨迹和逆动力学 + PD 控制律，并在真机发送前额外保留安全限位整形。运行结束后会输出：
+
+- `results/real_uart_capture.npz`
+- `results/real_uart_capture.json`
+- `results/real_friction_identification.npz`
+- `results/real_friction_identification.json`
+- `results/real_friction_identification_summary.json`
+
+如果你显式切到 `compensate` 模式，它会读取 `results/real_friction_identification_summary.json` 里的当前辨识参数，按
 
 ```text
 tau = fc * tanh(qd / velocity_scale) + fv * qd + offset
 ```
 
 计算 7 轴摩擦补偿力矩，再按 `[J1..J7]` 顺序发送给下位机。
-采集结果会额外保存到 `results/real_uart_capture.npz` 和 `results/real_uart_capture.json`。
 
 ### 只关闭 MuJoCo 窗口
 
