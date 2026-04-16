@@ -1,0 +1,44 @@
+{
+  "mode": "hardware_identification",
+  "config_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/friction_identification_core/config/default.yaml",
+  "target_joint": 0,
+  "target_joint_name": "ArmLsecond_Joint",
+  "retained_samples": 2990,
+  "estimated_coulomb": [
+    1.605585201912446e-29,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.16768948601137987,
+    0.11309248338291886
+  ],
+  "estimated_viscous": [
+    5e-324,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    3.1288087810100306e-16,
+    0.005531284752330384
+  ],
+  "estimated_offset": [
+    0.04999999999999996,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -0.049999999999999996,
+    0.0
+  ],
+  "updated_joint": {
+    "index": 0,
+    "name": "ArmLsecond_Joint",
+    "coulomb": 1.605585201912446e-29,
+    "viscous": 5e-324,
+    "offset": 0.04999999999999996,
+    "validation_rmse": 11.018803590798408,
+    "validation_r2": -0.1530860269336134
+  },
+  "velocity_scale": 0.03
+}

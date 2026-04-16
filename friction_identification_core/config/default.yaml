@@ -39,7 +39,7 @@ simulation_friction:
 # 摩擦辨识任务本身的配置
 identification:
   # 目标辨识关节的索引，从 0 开始
-  target_joint: 5
+  target_joint: 2
   # 激励轨迹参数
   excitation:
     # 激励时长，单位 s
@@ -72,6 +72,8 @@ safety:
   joint_limit_margin: 0.087
   # 是否对输出力矩做限幅保护
   enable_torque_clamp: true
+  # 靠近安全边界时逐步削弱继续朝边界方向的力矩，单位 rad
+  soft_limit_zone: 0.12
 
 # 采样与仿真步长配置
 sampling:
@@ -79,6 +81,8 @@ sampling:
   rate: 400.0
   # 仿真/积分步长，单位 s
   timestep: 0.0005
+  # 真机控制周期低于规划频率时，允许参考轨迹每次最多前进多少个规划步长
+  hardware_reference_step_factor: 4.0
 
 # 摩擦参数拟合器配置
 fitting:

@@ -36,29 +36,42 @@ class LiveReferenceState:
     startup_reference: ReferenceTrajectory | None = None
     startup_duration: float = 0.0
     reference_start_time: float | None = None
+    trajectory_elapsed_s: float = 0.0
+    last_elapsed_s: float | None = None
 
     def initialize(self, env: MujocoEnvironment, q_start: np.ndarray, startup_target: np.ndarray, elapsed_s: float) -> None:
         if self.reference_start_time is not None:
             return
         self.reference_start_time = float(elapsed_s)
+        self.last_elapsed_s = float(elapsed_s)
+        self.trajectory_elapsed_s = 0.0
         self.startup_reference = env.build_startup_reference(q_start, startup_target)
         if self.startup_reference is not None and self.startup_reference.time.size > 0:
             self.startup_duration = float(self.startup_reference.time[-1] + 1.0 / self.sample_rate)
 
-    def sample(self, elapsed_s: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def sample(self, elapsed_s: float, *, max_step_s: float | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if self.reference_start_time is None:
             raise RuntimeError("Live reference has not been initialized.")
-        local_elapsed = max(float(elapsed_s) - self.reference_start_time, 0.0)
+        if self.last_elapsed_s is None:
+            self.last_elapsed_s = float(elapsed_s)
+
+        delta_s = max(float(elapsed_s) - self.last_elapsed_s, 0.0)
+        self.last_elapsed_s = float(elapsed_s)
+        if max_step_s is not None and max_step_s > 0.0:
+            delta_s = min(delta_s, float(max_step_s))
+        self.trajectory_elapsed_s += delta_s
+
+        local_elapsed = self.trajectory_elapsed_s
         if self.startup_reference is not None and local_elapsed < self.startup_duration:
             return sample_reference_trajectory(self.startup_reference, local_elapsed, wrap=False)
         excitation_elapsed = max(local_elapsed - self.startup_duration, 0.0)
         return sample_reference_trajectory(self.excitation_reference, excitation_elapsed, wrap=False)
 
-    def is_complete(self, elapsed_s: float) -> bool:
+    def is_complete(self) -> bool:
         if self.reference_start_time is None:
             return False
         total_duration = self.startup_duration + float(self.excitation_reference.time[-1] + 1.0 / self.sample_rate)
-        return max(float(elapsed_s) - self.reference_start_time, 0.0) >= total_duration
+        return self.trajectory_elapsed_s >= total_duration
 
 
 class RigidBodyDynamics:
@@ -412,12 +425,16 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
     parameters = _load_compensation_parameters(config.summary_path, config.joint_count) if mode == "compensate" else None
 
     reference_state = None
+    reference_max_step_s = None
     if mode == "collect":
         excitation_reference = env.build_excitation_reference()
         startup_target = build_startup_pose(config, excitation_reference)
         reference_state = LiveReferenceState(
             excitation_reference=excitation_reference,
             sample_rate=config.sampling.rate,
+        )
+        reference_max_step_s = (
+            max(float(config.sampling.hardware_reference_step_factor), 1.0) / float(config.sampling.rate)
         )
 
     frame_reader = SerialFrameReader()
@@ -454,6 +471,10 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
     step_index = 0
     termination_reason = "completed"
     bytes_per_cycle = RECV_FRAME_SIZE * config.joint_count + SEND_FRAME_SIZE
+    command_refresh_period_s = 1.0 / max(float(config.sampling.rate), 1.0)
+    last_command_frame = zero_frame
+    last_command_send_time = None
+    last_feedback_wait_log_time = None
 
     log_info(
         "开始真机运行: "
@@ -464,6 +485,8 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
     try:
         ser = serial.Serial(config.serial.port, config.serial.baudrate, timeout=0)
         ser.reset_input_buffer()
+        ser.write(last_command_frame)
+        last_command_send_time = time.perf_counter()
     except Exception as exc:
         if reporter is not None:
             reporter.close()
@@ -509,7 +532,10 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
                 if mode == "collect":
                     assert reference_state is not None
                     reference_state.initialize(env, q, startup_target, elapsed_s)
-                    q_cmd_ref, qd_cmd_ref, qdd_cmd_ref = reference_state.sample(elapsed_s)
+                    q_cmd_ref, qd_cmd_ref, qdd_cmd_ref = reference_state.sample(
+                        elapsed_s,
+                        max_step_s=reference_max_step_s,
+                    )
                     tau_ff, tau_fb, tau_command = controller.compute_torque(
                         q_cmd=q_cmd_ref,
                         qd_cmd=qd_cmd_ref,
@@ -524,17 +550,23 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
                     qdd_cmd_ref = np.zeros_like(q)
                     tau_ff = np.zeros_like(q)
                     tau_fb = np.zeros_like(q)
-                    tau_command = safety.clamp_torque(
-                        _predict_compensation_torque(
-                            qd,
-                            parameters,
-                            torque_limits=config.robot.torque_limits,
-                        )
+                    tau_command = safety.soften_torque_near_joint_limits(
+                        q,
+                        safety.clamp_torque(
+                            _predict_compensation_torque(
+                                qd,
+                                parameters,
+                                torque_limits=config.robot.torque_limits,
+                            )
+                        ),
                     )
 
-                ser.write(frame_packer.pack(tau_command.astype(np.float32)))
+                last_command_frame = frame_packer.pack(tau_command.astype(np.float32))
+                ser.write(last_command_frame)
+                last_command_send_time = time.perf_counter()
                 emitted_sample = True
                 step_index += 1
+                last_feedback_wait_log_time = None
 
                 ee_pos = None
                 ee_quat = None
@@ -581,9 +613,34 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
                         tx_text=None,
                     )
 
-                if mode == "collect" and reference_state.is_complete(elapsed_s):
+                if mode == "collect" and reference_state.is_complete():
                     termination_reason = "collection_complete"
                     raise KeyboardInterrupt
+
+            if not emitted_sample:
+                now = time.perf_counter()
+                if (
+                    last_command_send_time is None
+                    or (now - last_command_send_time) >= command_refresh_period_s
+                ):
+                    ser.write(last_command_frame)
+                    last_command_send_time = now
+
+                if feedback_mask != complete_feedback_mask:
+                    missing_motor_ids = [
+                        str(motor_id)
+                        for motor_id in range(1, config.joint_count + 1)
+                        if (feedback_mask & (1 << (motor_id - 1))) == 0
+                    ]
+                    if (
+                        last_feedback_wait_log_time is None
+                        or (now - last_feedback_wait_log_time) >= 1.0
+                    ):
+                        log_info(
+                            "等待完整电机反馈，"
+                            f"当前缺少电机: {', '.join(missing_motor_ids)}"
+                        )
+                        last_feedback_wait_log_time = now
 
             if not emitted_sample or bytes_waiting <= 0:
                 time.sleep(0.0005)

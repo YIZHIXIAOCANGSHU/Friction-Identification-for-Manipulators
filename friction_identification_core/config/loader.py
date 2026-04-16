@@ -72,12 +72,14 @@ class ControllerConfig:
 class SafetyConfig:
     joint_limit_margin: float
     enable_torque_clamp: bool
+    soft_limit_zone: float
 
 
 @dataclass(frozen=True)
 class SamplingConfig:
     rate: float
     timestep: float
+    hardware_reference_step_factor: float
 
 
 @dataclass(frozen=True)
@@ -216,11 +218,13 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
     safety = SafetyConfig(
         joint_limit_margin=float(safety_raw["joint_limit_margin"]),
         enable_torque_clamp=bool(safety_raw["enable_torque_clamp"]),
+        soft_limit_zone=float(safety_raw.get("soft_limit_zone", 0.12)),
     )
 
     sampling = SamplingConfig(
         rate=float(raw["sampling"]["rate"]),
         timestep=float(raw["sampling"]["timestep"]),
+        hardware_reference_step_factor=float(raw["sampling"].get("hardware_reference_step_factor", 4.0)),
     )
 
     fitting_raw = raw["fitting"]

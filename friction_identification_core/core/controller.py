@@ -53,4 +53,5 @@ class FrictionIdentificationController:
 
         if self.safety is not None:
             tau = self.safety.clamp_torque(tau)
+            tau = self.safety.soften_torque_near_joint_limits(q_curr, tau)
         return tau_ff, tau_fb, tau

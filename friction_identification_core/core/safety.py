@@ -13,6 +13,7 @@ class SafetyGuard:
         self.joint_limits = np.asarray(config.robot.joint_limits, dtype=np.float64)
         self.torque_limits = np.asarray(config.robot.torque_limits, dtype=np.float64)
         self.margin = float(config.safety.joint_limit_margin)
+        self.soft_limit_zone = max(float(config.safety.soft_limit_zone), 0.0)
         self.enable_torque_clamp = bool(config.safety.enable_torque_clamp)
         if active_joint_mask is None:
             self.active_joint_mask = np.ones(len(self.joint_names), dtype=bool)
@@ -57,3 +58,30 @@ class SafetyGuard:
         if not self.enable_torque_clamp:
             return tau.copy()
         return np.clip(tau, -self.torque_limits, self.torque_limits)
+
+    def soften_torque_near_joint_limits(self, q: np.ndarray, tau: np.ndarray) -> np.ndarray:
+        q = np.asarray(q, dtype=np.float64).reshape(-1)
+        tau = np.asarray(tau, dtype=np.float64).reshape(-1).copy()
+        if self.soft_limit_zone <= 1e-9:
+            return tau
+
+        lower, upper = self.safe_joint_window()
+        for joint_idx, active in enumerate(self.active_joint_mask):
+            if not active:
+                continue
+
+            joint_tau = tau[joint_idx]
+            if joint_tau > 0.0:
+                outward_margin = upper[joint_idx] - q[joint_idx]
+            elif joint_tau < 0.0:
+                outward_margin = q[joint_idx] - lower[joint_idx]
+            else:
+                continue
+
+            if outward_margin <= 0.0:
+                tau[joint_idx] = 0.0
+                continue
+
+            if outward_margin < self.soft_limit_zone:
+                tau[joint_idx] *= outward_margin / self.soft_limit_zone
+        return tau
