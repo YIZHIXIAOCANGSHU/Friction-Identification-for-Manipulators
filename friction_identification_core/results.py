@@ -297,6 +297,18 @@ class ResultsManager:
         batch_valid_ratio = np.zeros((batch_count, joint_count), dtype=np.float64)
 
         for batch_idx, batch in enumerate(batches):
+            joint_clean_mask = (
+                np.asarray(batch.data.joint_clean_mask, dtype=bool)
+                if batch.data.joint_clean_mask is not None
+                else None
+            )
+            if joint_clean_mask is not None and joint_clean_mask.shape == (batch.data.sample_count, joint_count):
+                retained_per_joint = np.count_nonzero(joint_clean_mask, axis=0)
+                valid_ratio_per_joint = retained_per_joint / max(batch.data.sample_count, 1)
+                batch_sample_count[batch_idx] = retained_per_joint
+                batch_valid_ratio[batch_idx] = valid_ratio_per_joint
+                continue
+
             clean_mask = np.asarray(batch.data.clean_mask, dtype=bool) if batch.data.clean_mask is not None else None
             retained = int(np.count_nonzero(clean_mask)) if clean_mask is not None else batch.data.sample_count
             valid_ratio = retained / max(batch.data.sample_count, 1)
@@ -1051,6 +1063,8 @@ class ResultsManager:
             "tau_residual": data.tau_residual,
             "tau_friction": data.tau_friction,
             "clean_mask": data.clean_mask,
+            "joint_refresh_mask": data.joint_refresh_mask,
+            "joint_clean_mask": data.joint_clean_mask,
             "rotation_state": data.rotation_state,
             "range_ratio": data.range_ratio,
             "limit_margin_remaining": data.limit_margin_remaining,
@@ -1067,7 +1081,7 @@ class ResultsManager:
         for key, value in optional_arrays.items():
             if value is None:
                 continue
-            if key == "clean_mask":
+            if key in {"clean_mask", "joint_refresh_mask", "joint_clean_mask"}:
                 payload[key] = np.asarray(value, dtype=bool)
             else:
                 payload[key] = np.asarray(value)

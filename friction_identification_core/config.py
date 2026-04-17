@@ -105,6 +105,7 @@ class FittingConfig:
 class SerialConfig:
     port: str
     baudrate: int
+    feedback_stale_timeout_factor: float
 
 
 @dataclass(frozen=True)
@@ -112,7 +113,7 @@ class VisualizationConfig:
     render: bool
     spawn_rerun: bool
     viewer_fps: float = 30.0
-    rerun_log_stride: int = 1
+    rerun_log_stride: int = 5
     uart_text_log_interval: int = 100
 
 
@@ -297,9 +298,13 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
     )
 
     serial_raw = raw["serial"]
+    feedback_stale_timeout_factor = float(serial_raw.get("feedback_stale_timeout_factor", 8.0))
+    if feedback_stale_timeout_factor <= 0.0:
+        raise ValueError("serial.feedback_stale_timeout_factor must be > 0.")
     serial = SerialConfig(
         port=str(serial_raw["port"]),
         baudrate=int(serial_raw["baudrate"]),
+        feedback_stale_timeout_factor=feedback_stale_timeout_factor,
     )
 
     visualization_raw = raw["visualization"]
@@ -307,7 +312,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         render=bool(visualization_raw["render"]),
         spawn_rerun=bool(visualization_raw["spawn_rerun"]),
         viewer_fps=float(visualization_raw.get("viewer_fps", 30.0)),
-        rerun_log_stride=int(visualization_raw.get("rerun_log_stride", 1)),
+        rerun_log_stride=int(visualization_raw.get("rerun_log_stride", 5)),
         uart_text_log_interval=int(visualization_raw.get("uart_text_log_interval", 100)),
     )
 

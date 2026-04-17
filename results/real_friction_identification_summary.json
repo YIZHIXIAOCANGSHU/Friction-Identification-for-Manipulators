@@ -1,10 +1,10 @@
 {
-  "run_label": "20260417_202910",
+  "run_label": "20260417_212408",
   "mode": "collect",
-  "timestamp": "2026-04-17T12:30:10+00:00",
-  "batch_count": 1,
+  "timestamp": "2026-04-17T13:34:01+00:00",
+  "batch_count": 5,
   "config_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/friction_identification_core/default.yaml",
-  "archive_dir": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260417_202910_collect",
+  "archive_dir": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260417_212408_collect",
   "summary_npz_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_summary.npz",
   "report_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_report.md",
   "csv_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_summary.csv",
@@ -118,7 +118,7 @@
       "validation_rmse": NaN,
       "validation_r2": NaN,
       "valid_sample_ratio": 1.0,
-      "sample_count": 597,
+      "sample_count": 27802,
       "coulomb_std": 0.0,
       "viscous_std": 0.0,
       "offset_std": 0.0
@@ -133,7 +133,7 @@
       "validation_rmse": NaN,
       "validation_r2": NaN,
       "valid_sample_ratio": 1.0,
-      "sample_count": 597,
+      "sample_count": 27802,
       "coulomb_std": 0.0,
       "viscous_std": 0.0,
       "offset_std": 0.0
@@ -148,7 +148,7 @@
       "validation_rmse": NaN,
       "validation_r2": NaN,
       "valid_sample_ratio": 1.0,
-      "sample_count": 597,
+      "sample_count": 27802,
       "coulomb_std": 0.0,
       "viscous_std": 0.0,
       "offset_std": 0.0
@@ -163,7 +163,7 @@
       "validation_rmse": NaN,
       "validation_r2": NaN,
       "valid_sample_ratio": 1.0,
-      "sample_count": 597,
+      "sample_count": 27802,
       "coulomb_std": 0.0,
       "viscous_std": 0.0,
       "offset_std": 0.0
@@ -178,7 +178,7 @@
       "validation_rmse": NaN,
       "validation_r2": NaN,
       "valid_sample_ratio": 1.0,
-      "sample_count": 597,
+      "sample_count": 27802,
       "coulomb_std": 0.0,
       "viscous_std": 0.0,
       "offset_std": 0.0
@@ -193,7 +193,7 @@
       "validation_rmse": NaN,
       "validation_r2": NaN,
       "valid_sample_ratio": 1.0,
-      "sample_count": 597,
+      "sample_count": 27802,
       "coulomb_std": 0.0,
       "viscous_std": 0.0,
       "offset_std": 0.0
@@ -208,7 +208,7 @@
       "validation_rmse": NaN,
       "validation_r2": NaN,
       "valid_sample_ratio": 1.0,
-      "sample_count": 597,
+      "sample_count": 27802,
       "coulomb_std": 0.0,
       "viscous_std": 0.0,
       "offset_std": 0.0
@@ -228,7 +228,7 @@
       "validation_rmse": NaN,
       "validation_r2": NaN,
       "valid_sample_ratio": 1.0,
-      "sample_count": 597,
+      "sample_count": 27802,
       "coulomb_std": 0.0,
       "viscous_std": 0.0,
       "offset_std": 0.0
@@ -243,7 +243,7 @@
       "validation_rmse": NaN,
       "validation_r2": NaN,
       "valid_sample_ratio": 1.0,
-      "sample_count": 597,
+      "sample_count": 27802,
       "coulomb_std": 0.0,
       "viscous_std": 0.0,
       "offset_std": 0.0
@@ -258,7 +258,7 @@
       "validation_rmse": NaN,
       "validation_r2": NaN,
       "valid_sample_ratio": 1.0,
-      "sample_count": 597,
+      "sample_count": 27802,
       "coulomb_std": 0.0,
       "viscous_std": 0.0,
       "offset_std": 0.0
@@ -271,6 +271,42 @@
     "batch_validation_rmse": [],
     "batch_validation_r2": [],
     "batch_valid_sample_ratio": [
+      [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
       [
         1.0,
         1.0,

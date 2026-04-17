@@ -1,0 +1,8 @@
+joint_index,joint_name,identified,coulomb,viscous,offset,validation_rmse,validation_r2,valid_sample_ratio,sample_count,coulomb_std,viscous_std,offset_std
+0,ArmLsecond_Joint,True,0.0,0.0,0.0,nan,nan,1.0,9717,0.0,0.0,0.0
+1,ArmLthird_Joint,True,0.0,0.0,0.0,nan,nan,1.0,9717,0.0,0.0,0.0
+2,ArmLfourth_Joint,True,0.0,0.0,0.0,nan,nan,1.0,9717,0.0,0.0,0.0
+3,ArmLfifth_Joint,True,0.0,0.0,0.0,nan,nan,1.0,9717,0.0,0.0,0.0
+4,ArmLsixth_Joint,True,0.0,0.0,0.0,nan,nan,1.0,9717,0.0,0.0,0.0
+5,ArmLsixthoutput_Joint,True,0.0,0.0,0.0,nan,nan,1.0,9717,0.0,0.0,0.0
+6,ArmLseventh_Joint,True,0.0,0.0,0.0,nan,nan,1.0,9717,0.0,0.0,0.0

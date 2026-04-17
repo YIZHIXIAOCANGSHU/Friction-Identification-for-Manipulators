@@ -67,12 +67,13 @@ fitting:
 serial:
   port: "/dev/ttyUSB0"
   baudrate: 115200
+  feedback_stale_timeout_factor: 21.0
 
 visualization:
-  render: true
+  render: false
   spawn_rerun: true
   viewer_fps: 30.0
-  rerun_log_stride: 1
+  rerun_log_stride: 5
   uart_text_log_interval: 100
 
 status:

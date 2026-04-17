@@ -1,0 +1,10 @@
+{
+  "run_label": "20260417_211509",
+  "archive_dir": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/debug_live_after_waitfix_rerunfix/runs/20260417_211509_collect",
+  "manifest_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/debug_live_after_waitfix_rerunfix/runs/20260417_211509_collect/run_manifest.json",
+  "summary_npz_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/debug_live_after_waitfix_rerunfix/hardware_identification_summary.npz",
+  "report_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/debug_live_after_waitfix_rerunfix/hardware_identification_report.md",
+  "csv_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/debug_live_after_waitfix_rerunfix/hardware_identification_summary.csv",
+  "json_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/debug_live_after_waitfix_rerunfix/real_friction_identification_summary.json",
+  "timestamp": "2026-04-17T13:15:30+00:00"
+}

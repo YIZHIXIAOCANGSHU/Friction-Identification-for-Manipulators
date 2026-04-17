@@ -9,7 +9,11 @@ from friction_identification_core.config import Config
 from friction_identification_core.models import FrictionIdentificationResult
 from friction_identification_core.mujoco_support import build_am_d02_model
 from friction_identification_core.runtime import log_info
-from friction_identification_core.status import format_joint_motion_summary
+from friction_identification_core.status import (
+    format_feedback_cycle_summary,
+    format_joint_motion_summary,
+    format_runtime_status,
+)
 
 if TYPE_CHECKING:
     from friction_identification_core.results import IdentificationResults
@@ -98,10 +102,21 @@ def _identification_history_path(metric_key: str, joint_id: int) -> str:
 class HardwareRerunReporter:
     """Realtime Rerun dashboard for 7-axis collection and compensation runs."""
 
-    def __init__(self, *, app_name: str, joint_names: list[str], spawn: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        app_name: str,
+        joint_names: list[str],
+        spawn: bool = True,
+        show_ee_view: bool = True,
+    ) -> None:
         self.app_name = app_name
         self.spawn = spawn
         self.joint_names = list(joint_names)
+        self.show_ee_view = bool(show_ee_view)
+        self.series_grid_columns = 3 if len(self.joint_names) >= 5 else max(len(self.joint_names), 1)
+        self.per_joint_grid_columns = 2
+        self.identification_grid_columns = 3
         self._rr = None
 
     def init(self) -> None:
@@ -115,12 +130,13 @@ class HardwareRerunReporter:
             rrb.Blueprint(
                 rrb.Tabs(
                     self._build_overview_tab(rrb),
-                    self._build_joint_centric_tab(rrb),
                     self._build_motion_tab(rrb),
+                    self._build_command_tab(rrb),
                     self._build_torque_tab(rrb),
+                    self._build_thermal_tab(rrb),
                     self._build_identification_tab(rrb),
                     self._build_runtime_tab(rrb),
-                    active_tab="Overview",
+                    self._build_joint_centric_tab(rrb),
                 ),
                 collapse_panels=True,
             )
@@ -159,7 +175,7 @@ class HardwareRerunReporter:
                 )
                 for joint_idx in range(len(self.joint_names))
             ],
-            grid_columns=min(4, max(len(self.joint_names), 1)),
+            grid_columns=self.series_grid_columns,
             name=title,
         )
 
@@ -206,7 +222,7 @@ class HardwareRerunReporter:
                     name="Limit Margin",
                     origin=f"/{_joint_entity_path('safety/limit_margin_remaining', joint_id)}",
                 ),
-                grid_columns=4,
+                grid_columns=self.per_joint_grid_columns,
                 name="Motion",
             ),
             rrb.Grid(
@@ -233,30 +249,38 @@ class HardwareRerunReporter:
                     name="Coil Temperature",
                     origin=f"/{_joint_entity_path('health/coil_temperature', joint_id)}",
                 ),
-                grid_columns=4,
+                grid_columns=self.per_joint_grid_columns,
                 name="Torque & Health",
             ),
             self._identification_history_grid(
                 rrb,
                 joint_ids=[joint_id],
                 name="Identification",
-                grid_columns=3,
+                grid_columns=self.identification_grid_columns,
             ),
             name=f"J{joint_id}",
         )
 
     def _build_overview_tab(self, rrb):
+        overview_panels = [
+            rrb.Vertical(
+                rrb.TextDocumentView(name="Runtime Status", origin="/runtime/status"),
+                rrb.TextDocumentView(name="Feedback Cycle", origin="/runtime/feedback_cycle"),
+                rrb.TextDocumentView(name="Joint Summary", origin="/runtime/joint_summary"),
+                row_shares=[0.8, 0.7, 1.2],
+                name="Live Status",
+            ),
+            rrb.TextDocumentView(name="Identification Summary", origin="/identification/summary"),
+        ]
+        column_shares = [1.05, 1.35]
+        if self.show_ee_view:
+            overview_panels.append(rrb.Spatial3DView(name="EE Pose", origin="/trajectory_3d"))
+            column_shares.append(1.0)
+
         return rrb.Vertical(
             rrb.Horizontal(
-                rrb.Vertical(
-                    rrb.TextDocumentView(name="Runtime Status", origin="/runtime/status"),
-                    rrb.TextDocumentView(name="Joint Summary", origin="/runtime/joint_summary"),
-                    row_shares=[0.75, 1.25],
-                    name="Live Status",
-                ),
-                rrb.TextDocumentView(name="Identification Summary", origin="/identification/summary"),
-                rrb.Spatial3DView(name="EE Pose", origin="/trajectory_3d"),
-                column_shares=[1.0, 1.35, 1.1],
+                *overview_panels,
+                column_shares=column_shares,
                 name="Status Overview",
             ),
             rrb.Tabs(
@@ -298,9 +322,25 @@ class HardwareRerunReporter:
                         rrb,
                         joint_ids=list(range(1, len(self.joint_names) + 1)),
                         name="Per-Joint Parameter Trends",
-                        grid_columns=len(_IDENTIFICATION_METRIC_SPECS),
+                        grid_columns=self.identification_grid_columns,
                     ),
                     name="Identification Snapshot",
+                ),
+                rrb.Vertical(
+                    self._joint_metric_grid(
+                        rrb,
+                        title="Cmd Position",
+                        prefix="joint_state/q_cmd",
+                        view_label="Cmd Position",
+                    ),
+                    self._joint_metric_grid(
+                        rrb,
+                        title="Cmd Velocity",
+                        prefix="joint_state/qd_cmd",
+                        view_label="Cmd Velocity",
+                    ),
+                    self._joint_metric_grid(rrb, title="Phase", prefix="joint_state/phase", view_label="Phase"),
+                    name="Command Snapshot",
                 ),
                 rrb.Grid(
                     rrb.TimeSeriesView(name="UART Frequency", origin="/runtime/uart_cycle_hz"),
@@ -311,6 +351,21 @@ class HardwareRerunReporter:
                     grid_columns=3,
                     name="Runtime Trends",
                 ),
+                rrb.Vertical(
+                    self._joint_metric_grid(
+                        rrb,
+                        title="MOS Temperature",
+                        prefix="health/mos_temperature",
+                        view_label="MOS Temp",
+                    ),
+                    self._joint_metric_grid(
+                        rrb,
+                        title="Coil Temperature",
+                        prefix="health/coil_temperature",
+                        view_label="Coil Temp",
+                    ),
+                    name="Thermal Snapshot",
+                ),
                 name="Quick Panels",
             ),
             name="Overview",
@@ -319,7 +374,6 @@ class HardwareRerunReporter:
     def _build_joint_centric_tab(self, rrb):
         return rrb.Tabs(
             *[self._joint_tab(rrb, joint_id=joint_idx + 1) for joint_idx in range(len(self.joint_names))],
-            active_tab="J1" if self.joint_names else None,
             name="By Joint",
         )
 
@@ -327,15 +381,20 @@ class HardwareRerunReporter:
         return rrb.Vertical(
             self._joint_metric_grid(rrb, title="Position", prefix="joint_state/q", view_label="Position"),
             self._joint_metric_grid(rrb, title="Velocity", prefix="joint_state/qd", view_label="Velocity"),
-            self._joint_metric_grid(rrb, title="Cmd Position", prefix="joint_state/q_cmd", view_label="Cmd Position"),
-            self._joint_metric_grid(rrb, title="Cmd Velocity", prefix="joint_state/qd_cmd", view_label="Cmd Velocity"),
+            self._joint_metric_grid(rrb, title="Range Ratio", prefix="joint_state/range_ratio", view_label="Range"),
             self._joint_metric_grid(
                 rrb,
                 title="Rotation State",
                 prefix="joint_state/rotation_state",
                 view_label="Rotation",
             ),
-            self._joint_metric_grid(rrb, title="Range Ratio", prefix="joint_state/range_ratio", view_label="Range"),
+            name="Motion",
+        )
+
+    def _build_command_tab(self, rrb):
+        return rrb.Vertical(
+            self._joint_metric_grid(rrb, title="Cmd Position", prefix="joint_state/q_cmd", view_label="Cmd Position"),
+            self._joint_metric_grid(rrb, title="Cmd Velocity", prefix="joint_state/qd_cmd", view_label="Cmd Velocity"),
             self._joint_metric_grid(rrb, title="Phase", prefix="joint_state/phase", view_label="Phase"),
             self._joint_metric_grid(
                 rrb,
@@ -343,7 +402,7 @@ class HardwareRerunReporter:
                 prefix="safety/limit_margin_remaining",
                 view_label="Margin",
             ),
-            name="Joint Motion",
+            name="Command",
         )
 
     def _build_torque_tab(self, rrb):
@@ -372,6 +431,31 @@ class HardwareRerunReporter:
             name="Torque",
         )
 
+    def _build_thermal_tab(self, rrb):
+        return rrb.Vertical(
+            self._joint_metric_grid(
+                rrb,
+                title="MOS Temperature",
+                prefix="health/mos_temperature",
+                view_label="MOS Temp",
+            ),
+            self._joint_metric_grid(
+                rrb,
+                title="Coil Temperature",
+                prefix="health/coil_temperature",
+                view_label="Coil Temp",
+            ),
+            rrb.Grid(
+                rrb.TimeSeriesView(name="UART Frequency", origin="/runtime/uart_cycle_hz"),
+                rrb.TimeSeriesView(name="UART Period", origin="/runtime/uart_latency_ms"),
+                rrb.TimeSeriesView(name="UART Throughput", origin="/runtime/uart_transfer_kbps"),
+                rrb.TimeSeriesView(name="Valid Sample Ratio", origin="/runtime/valid_sample_ratio"),
+                grid_columns=2,
+                name="Runtime Diagnostics",
+            ),
+            name="Thermal",
+        )
+
     def _build_identification_tab(self, rrb):
         return rrb.Vertical(
             rrb.Horizontal(
@@ -384,12 +468,26 @@ class HardwareRerunReporter:
                 rrb,
                 joint_ids=list(range(1, len(self.joint_names) + 1)),
                 name="Per-Joint Parameter Mini Charts",
-                grid_columns=len(_IDENTIFICATION_METRIC_SPECS),
+                grid_columns=self.identification_grid_columns,
             ),
             name="Identification",
         )
 
     def _build_runtime_tab(self, rrb):
+        runtime_panels = [
+            rrb.Vertical(
+                rrb.TextDocumentView(name="Runtime Status", origin="/runtime/status"),
+                rrb.TextDocumentView(name="Feedback Cycle", origin="/runtime/feedback_cycle"),
+                rrb.TextDocumentView(name="Joint Summary", origin="/runtime/joint_summary"),
+                row_shares=[0.8, 0.7, 1.2],
+                name="Runtime Text Panels",
+            ),
+        ]
+        column_shares = [1.35]
+        if self.show_ee_view:
+            runtime_panels.append(rrb.Spatial3DView(name="EE Pose", origin="/trajectory_3d"))
+            column_shares.append(1.0)
+
         return rrb.Vertical(
             rrb.Grid(
                 rrb.TimeSeriesView(name="UART Frequency", origin="/runtime/uart_cycle_hz"),
@@ -413,10 +511,8 @@ class HardwareRerunReporter:
                 view_label="Coil Temp",
             ),
             rrb.Horizontal(
-                rrb.TextDocumentView(name="Runtime Status", origin="/runtime/status"),
-                rrb.TextDocumentView(name="Joint Summary", origin="/runtime/joint_summary"),
-                rrb.Spatial3DView(name="EE Pose", origin="/trajectory_3d"),
-                column_shares=[1.0, 1.2, 1.1],
+                *runtime_panels,
+                column_shares=column_shares,
                 name="Runtime Overview",
             ),
             name="Runtime",
@@ -449,6 +545,8 @@ class HardwareRerunReporter:
         uart_transfer_kbps: float,
         valid_sample_ratio: float,
         phase_name: str,
+        active_joint_ids: list[int] | np.ndarray,
+        feedback_cycle_joint_ids: list[int] | np.ndarray,
         ee_pos: np.ndarray | None,
         ee_quat: np.ndarray | None,
     ) -> None:
@@ -488,24 +586,31 @@ class HardwareRerunReporter:
         rr.log(
             "runtime/status",
             rr.TextDocument(
-                "\n".join(
-                    [
-                        f"batch: {batch_index}/{total_batches}",
-                        f"phase: {phase_name or 'unknown'}",
-                        f"valid_sample_ratio: {valid_sample_ratio:.3f}",
-                        f"uart_cycle_hz: {uart_cycle_hz:.2f}",
-                        f"uart_latency_ms: {uart_latency_ms:.2f}",
-                        f"uart_transfer_kbps: {uart_transfer_kbps:.2f}",
-                    ]
+                format_runtime_status(
+                    batch_index=batch_index,
+                    total_batches=total_batches,
+                    step_index=step_index,
+                    phase_name=phase_name,
+                    valid_sample_ratio=valid_sample_ratio,
+                    uart_cycle_hz=uart_cycle_hz,
+                    uart_latency_ms=uart_latency_ms,
+                    uart_transfer_kbps=uart_transfer_kbps,
                 ),
-                media_type="text/plain",
+                media_type="text/markdown",
+            ),
+        )
+        rr.log(
+            "runtime/feedback_cycle",
+            rr.TextDocument(
+                format_feedback_cycle_summary(active_joint_ids, feedback_cycle_joint_ids),
+                media_type="text/markdown",
             ),
         )
         rr.log(
             "runtime/joint_summary",
             rr.TextDocument(
                 format_joint_motion_summary(self.joint_names, rotation_state, range_ratio, qd),
-                media_type="text/plain",
+                media_type="text/markdown",
             ),
         )
 
@@ -618,8 +723,30 @@ class HardwareRerunReporter:
             },
         )
 
+        active_mask = np.isfinite(validation_rmse) & np.isfinite(validation_r2)
+        active_joint_labels = [
+            f"J{int(joint_idx) + 1}"
+            for joint_idx, is_active in zip(joint_indices, active_mask)
+            if bool(is_active)
+        ]
+        mean_rmse = float(np.nanmean(validation_rmse[active_mask])) if np.any(active_mask) else float("nan")
+        mean_r2 = float(np.nanmean(validation_r2[active_mask])) if np.any(active_mask) else float("nan")
+        mean_valid_ratio = (
+            float(np.nanmean(valid_sample_ratio[active_mask]))
+            if valid_sample_ratio is not None and np.any(active_mask)
+            else float("nan")
+        )
         lines = [
             f"# {title}",
+            "",
+            "## Quick Read",
+            "",
+            f"- Active joints: `{', '.join(active_joint_labels) if active_joint_labels else 'N/A'}`",
+            f"- Mean validation RMSE: `{mean_rmse:.6f}`",
+            f"- Mean validation R2: `{mean_r2:.4f}`",
+            f"- Mean valid ratio: `{mean_valid_ratio:.4f}`" if np.isfinite(mean_valid_ratio) else "- Mean valid ratio: `N/A`",
+            "",
+            "## Joint Table",
             "",
             "| Joint | Coulomb | Viscous | Offset | Val RMSE | Val R2 | Sample Count | Valid Ratio |",
             "|---|---:|---:|---:|---:|---:|---:|---:|",
@@ -785,6 +912,7 @@ def build_hardware_reporter(config: Config):
             app_name="AM-D02 Parallel Hardware Friction Identification",
             joint_names=list(config.robot.joint_names),
             spawn=True,
+            show_ee_view=bool(config.visualization.render),
         )
         reporter.init()
         return reporter

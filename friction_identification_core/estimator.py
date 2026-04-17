@@ -127,6 +127,17 @@ def _compute_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(1.0 - residual / denom)
 
 
+def _build_periodic_validation_mask(num_samples: int) -> np.ndarray:
+    mask = np.zeros(max(int(num_samples), 0), dtype=bool)
+    if mask.size == 0:
+        return mask
+    mask[::5] = True
+    mask[: min(20, mask.size)] = False
+    if np.all(mask):
+        mask[-1] = False
+    return mask
+
+
 def _build_candidate_velocity_scales_for_joint(
     joint_velocity: np.ndarray,
     *,
@@ -244,6 +255,7 @@ def fit_multijoint_friction(
     *,
     joint_names: Optional[Iterable[str]] = None,
     validation_mask: Optional[np.ndarray] = None,
+    sample_mask: Optional[np.ndarray] = None,
     velocity_scale: float = 0.02,
     regularization: float = 1e-8,
     max_iterations: int = 12,
@@ -264,26 +276,41 @@ def fit_multijoint_friction(
     else:
         joint_names = list(joint_names)
 
-    if validation_mask is None:
-        validation_mask = np.zeros(num_samples, dtype=bool)
-        validation_mask[::5] = True
-        if np.all(validation_mask):
-            validation_mask[-1] = False
+    if sample_mask is None:
+        joint_sample_mask = np.isfinite(velocity) & np.isfinite(torque)
     else:
-        validation_mask = np.asarray(validation_mask, dtype=bool).reshape(-1)
-        if validation_mask.size != num_samples:
-            raise ValueError("validation_mask 长度必须与样本数一致。")
+        joint_sample_mask = np.asarray(sample_mask, dtype=bool)
+        if joint_sample_mask.shape != velocity.shape:
+            raise ValueError("sample_mask 必须与 velocity/torque 形状一致。")
+        joint_sample_mask &= np.isfinite(velocity) & np.isfinite(torque)
 
-    train_mask = ~validation_mask
-    if np.count_nonzero(train_mask) < max(10, 2 * num_joints):
-        raise ValueError("训练样本不足，无法执行多关节摩擦辨识。")
+    if validation_mask is None:
+        validation_mask_matrix = np.zeros_like(joint_sample_mask, dtype=bool)
+        for joint_idx in range(num_joints):
+            joint_indices = np.flatnonzero(joint_sample_mask[:, joint_idx])
+            if joint_indices.size == 0:
+                continue
+            joint_validation = _build_periodic_validation_mask(joint_indices.size)
+            validation_mask_matrix[joint_indices[joint_validation], joint_idx] = True
+    else:
+        raw_validation_mask = np.asarray(validation_mask, dtype=bool)
+        if raw_validation_mask.ndim == 1:
+            if raw_validation_mask.size != num_samples:
+                raise ValueError("validation_mask 长度必须与样本数一致。")
+            validation_mask_matrix = joint_sample_mask & raw_validation_mask[:, None]
+        elif raw_validation_mask.shape == velocity.shape:
+            validation_mask_matrix = joint_sample_mask & raw_validation_mask
+        else:
+            raise ValueError("validation_mask 必须是长度为 N 的向量或形状为 [N, J] 的布尔数组。")
+
+    train_mask = joint_sample_mask & (~validation_mask_matrix)
 
     parameters: list[JointFrictionParameters] = []
-    predicted_torque = np.zeros_like(torque)
-    train_rmse = np.zeros(num_joints)
-    validation_rmse = np.zeros(num_joints)
-    train_r2 = np.zeros(num_joints)
-    validation_r2 = np.zeros(num_joints)
+    predicted_torque = np.full_like(torque, np.nan, dtype=np.float64)
+    train_rmse = np.full(num_joints, np.nan, dtype=np.float64)
+    validation_rmse = np.full(num_joints, np.nan, dtype=np.float64)
+    train_r2 = np.full(num_joints, np.nan, dtype=np.float64)
+    validation_r2 = np.full(num_joints, np.nan, dtype=np.float64)
     candidate_velocity_scales = tuple(
         sorted(
             {
@@ -305,8 +332,21 @@ def fit_multijoint_friction(
     for joint_idx in range(num_joints):
         if progress_callback is not None:
             progress_callback(joint_idx + 1, num_joints, joint_names[joint_idx])
+        joint_train_mask = train_mask[:, joint_idx]
+        joint_validation_mask = validation_mask_matrix[:, joint_idx]
+        if np.count_nonzero(joint_train_mask) < 8:
+            parameters.append(
+                JointFrictionParameters(
+                    coulomb=float("nan"),
+                    viscous=float("nan"),
+                    offset=float("nan"),
+                    velocity_scale=float(velocity_scale),
+                )
+            )
+            continue
+
         candidate_velocity_scales_joint = _build_candidate_velocity_scales_for_joint(
-            velocity[train_mask, joint_idx],
+            velocity[joint_train_mask, joint_idx],
             default_velocity_scale=velocity_scale,
             fallback=candidate_velocity_scales,
         )
@@ -314,19 +354,22 @@ def fit_multijoint_friction(
         params = None
         for candidate_scale in candidate_velocity_scales_joint:
             for include_offset in (False, True):
-                candidate_params = fit_joint_friction(
-                    velocity[train_mask, joint_idx],
-                    torque[train_mask, joint_idx],
-                    velocity_scale=candidate_scale,
-                    regularization=regularization,
-                    max_iterations=max_iterations,
-                    huber_delta=huber_delta,
-                    min_velocity_threshold=min_velocity_threshold,
-                    include_offset=include_offset,
-                    nonnegative=True,
-                )
+                try:
+                    candidate_params = fit_joint_friction(
+                        velocity[joint_train_mask, joint_idx],
+                        torque[joint_train_mask, joint_idx],
+                        velocity_scale=candidate_scale,
+                        regularization=regularization,
+                        max_iterations=max_iterations,
+                        huber_delta=huber_delta,
+                        min_velocity_threshold=min_velocity_threshold,
+                        include_offset=include_offset,
+                        nonnegative=True,
+                    )
+                except ValueError:
+                    continue
                 candidate_pred = predict_friction_torque(velocity[:, joint_idx], candidate_params)
-                selection_mask = validation_mask if np.any(validation_mask) else train_mask
+                selection_mask = joint_validation_mask if np.any(joint_validation_mask) else joint_train_mask
                 selection_rmse = _compute_rmse(
                     torque[selection_mask, joint_idx],
                     candidate_pred[selection_mask],
@@ -338,25 +381,34 @@ def fit_multijoint_friction(
                     best_score = score
                     params = candidate_params
 
-        assert params is not None
+        if params is None:
+            parameters.append(
+                JointFrictionParameters(
+                    coulomb=float("nan"),
+                    viscous=float("nan"),
+                    offset=float("nan"),
+                    velocity_scale=float(velocity_scale),
+                )
+            )
+            continue
         parameters.append(params)
 
         predicted_torque[:, joint_idx] = predict_friction_torque(velocity[:, joint_idx], params)
         train_rmse[joint_idx] = _compute_rmse(
-            torque[train_mask, joint_idx],
-            predicted_torque[train_mask, joint_idx],
+            torque[joint_train_mask, joint_idx],
+            predicted_torque[joint_train_mask, joint_idx],
         )
         validation_rmse[joint_idx] = _compute_rmse(
-            torque[validation_mask, joint_idx],
-            predicted_torque[validation_mask, joint_idx],
+            torque[joint_validation_mask, joint_idx],
+            predicted_torque[joint_validation_mask, joint_idx],
         )
         train_r2[joint_idx] = _compute_r2(
-            torque[train_mask, joint_idx],
-            predicted_torque[train_mask, joint_idx],
+            torque[joint_train_mask, joint_idx],
+            predicted_torque[joint_train_mask, joint_idx],
         )
         validation_r2[joint_idx] = _compute_r2(
-            torque[validation_mask, joint_idx],
-            predicted_torque[validation_mask, joint_idx],
+            torque[joint_validation_mask, joint_idx],
+            predicted_torque[joint_validation_mask, joint_idx],
         )
 
     return FrictionIdentificationResult(
@@ -365,7 +417,7 @@ def fit_multijoint_friction(
         predicted_torque=predicted_torque,
         measured_torque=torque,
         train_mask=train_mask,
-        validation_mask=validation_mask,
+        validation_mask=validation_mask_matrix,
         train_rmse=train_rmse,
         validation_rmse=validation_rmse,
         train_r2=train_r2,

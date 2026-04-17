@@ -3,11 +3,13 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
+import numpy as np
+
 from friction_identification_core.config import Config
 from friction_identification_core.controller import FrictionIdentificationController, SafetyGuard
 from friction_identification_core.estimator import fit_multijoint_friction
 from friction_identification_core.models import CollectedData, DataSource, FrictionIdentificationResult
-from friction_identification_core.results import ResultPaths, ResultStore, build_validation_mask
+from friction_identification_core.results import ResultPaths, ResultStore
 from friction_identification_core.runtime import log_info
 from friction_identification_core.sources import build_source
 
@@ -55,11 +57,11 @@ class IdentificationPipeline:
         identification_inputs = self.source.prepare_identification(data)
         if identification_inputs is None:
             return None
-        return fit_multijoint_friction(
+        result = fit_multijoint_friction(
             velocity=identification_inputs.velocity,
             torque=identification_inputs.torque,
             joint_names=identification_inputs.joint_names,
-            validation_mask=build_validation_mask(identification_inputs.velocity.shape[0]),
+            sample_mask=identification_inputs.sample_mask,
             velocity_scale=self.config.fitting.velocity_scale,
             regularization=self.config.fitting.regularization,
             max_iterations=self.config.fitting.max_iterations,
@@ -68,6 +70,10 @@ class IdentificationPipeline:
             true_coulomb=identification_inputs.true_coulomb,
             true_viscous=identification_inputs.true_viscous,
         )
+        if not any(np.isfinite(param.coulomb) and np.isfinite(param.viscous) for param in result.parameters):
+            log_info("各关节有效样本仍不足以稳定辨识，本批次跳过辨识结果保存。")
+            return None
+        return result
 
     def run(self, *, mode: str) -> PipelineRunResult:
         if mode not in {"collect", "compensate"}:

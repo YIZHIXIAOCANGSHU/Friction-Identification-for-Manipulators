@@ -124,6 +124,8 @@ class CollectedData:
     tau_constraint: np.ndarray | None = None
     tau_friction: np.ndarray | None = None
     clean_mask: np.ndarray | None = None
+    joint_refresh_mask: np.ndarray | None = None
+    joint_clean_mask: np.ndarray | None = None
     rotation_state: np.ndarray | None = None
     range_ratio: np.ndarray | None = None
     limit_margin_remaining: np.ndarray | None = None
@@ -153,6 +155,7 @@ class IdentificationInputs:
     torque: np.ndarray
     joint_names: list[str]
     clean_mask: np.ndarray | None = None
+    sample_mask: np.ndarray | None = None
     true_coulomb: np.ndarray | None = None
     true_viscous: np.ndarray | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
