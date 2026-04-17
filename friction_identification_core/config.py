@@ -40,6 +40,7 @@ class FrictionConfig:
     viscous: np.ndarray
 
 
+
 @dataclass(frozen=True)
 class ExcitationConfig:
     duration: float
