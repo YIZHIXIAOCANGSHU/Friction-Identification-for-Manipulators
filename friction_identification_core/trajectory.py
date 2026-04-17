@@ -93,13 +93,13 @@ def _phase_durations(
     )
     durations = np.maximum(desired, minimum)
     durations *= float(duration) / max(float(np.sum(durations)), 1e-9)
-    names = ("center_hold", "full_range_sweep", "reversal_dither", "speed_sweep", "hold")
+    names = ("home_to_center", "full_range_sweep", "reversal_dither", "speed_sweep", "hold")
     return {name: float(value) for name, value in zip(names, durations)}
 
 
-def _triangle_wave(phase: np.ndarray) -> np.ndarray:
-    frac = np.mod(np.asarray(phase, dtype=np.float64), 1.0)
-    return 1.0 - np.abs(2.0 * frac - 1.0)
+def _smootherstep(x: np.ndarray) -> np.ndarray:
+    x = np.clip(np.asarray(x, dtype=np.float64), 0.0, 1.0)
+    return x * x * x * (x * (x * 6.0 - 15.0) + 10.0)
 
 
 def _normalize_harmonic_weights(harmonic_weights: np.ndarray) -> np.ndarray:
@@ -138,6 +138,240 @@ def _safe_joint_window(
     if np.any(invalid):
         raise ValueError("Safety margin leaves no valid joint window for one or more joints.")
     return lower_safe, upper_safe, limited
+
+
+def resolve_joint_window(
+    joint_limits: np.ndarray,
+    *,
+    safety_margin: float,
+    window_mode: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    mode = str(window_mode).strip().lower()
+    if mode == "safe":
+        return _safe_joint_window(joint_limits, safety_margin=safety_margin)
+    if mode == "hard":
+        return resolve_joint_limit_arrays(joint_limits)
+    if mode == "unbounded":
+        joint_limits = np.asarray(joint_limits, dtype=np.float64)
+        if joint_limits.ndim != 2 or joint_limits.shape[1] != 2:
+            raise ValueError("joint_limits must have shape [num_joints, 2].")
+        joint_count = int(joint_limits.shape[0])
+        return (
+            np.full(joint_count, -np.inf, dtype=np.float64),
+            np.full(joint_count, np.inf, dtype=np.float64),
+            np.zeros(joint_count, dtype=bool),
+        )
+    raise ValueError(f"Unsupported joint window mode: {window_mode}")
+
+
+def _chirp_wave(
+    local_t: np.ndarray,
+    *,
+    duration: float,
+    start_cycles: float,
+    end_cycles: float,
+    phase_offset: float,
+) -> np.ndarray:
+    local_t = np.asarray(local_t, dtype=np.float64)
+    duration = max(float(duration), 1e-6)
+    u = np.clip(local_t / duration, 0.0, 1.0)
+    chirp_phase = start_cycles * u + 0.5 * (end_cycles - start_cycles) * u * u + float(phase_offset)
+    return np.sin(2.0 * np.pi * chirp_phase)
+
+
+def _boundary_envelope(u: np.ndarray, *, power: float = 2.0) -> np.ndarray:
+    u = np.clip(np.asarray(u, dtype=np.float64), 0.0, 1.0)
+    return np.power(np.sin(np.pi * u), max(float(power), 1.0))
+
+
+def _phase_warp(u: np.ndarray, *, joint_phase: float, strength: float) -> np.ndarray:
+    u = np.asarray(u, dtype=np.float64)
+    warped = u + float(strength) * np.sin(2.0 * np.pi * u) * np.sin(2.0 * np.pi * float(joint_phase))
+    return np.clip(warped, 0.0, 1.0)
+
+
+def _build_speed_phase_cycles(speed_u: np.ndarray, speed_schedule: np.ndarray) -> np.ndarray:
+    speed_u = np.clip(np.asarray(speed_u, dtype=np.float64), 0.0, 1.0)
+    speed_schedule = np.asarray(speed_schedule, dtype=np.float64).reshape(-1)
+    if speed_u.size == 0:
+        return np.zeros(0, dtype=np.float64)
+
+    anchors = np.linspace(0.0, 1.0, max(speed_schedule.size, 1))
+    schedule_profile = np.interp(speed_u, anchors, speed_schedule)
+    frequency_profile = 0.55 + 1.85 * schedule_profile
+    delta_u = np.diff(speed_u, prepend=0.0)
+    cycles = np.cumsum(frequency_profile * delta_u)
+    if cycles[-1] <= 1e-9:
+        return np.linspace(0.0, 1.0, speed_u.size, endpoint=True)
+
+    target_total_cycles = max(float(np.round(cycles[-1])), 1.0)
+    return cycles * (target_total_cycles / cycles[-1])
+
+
+def _integrate_velocity_profile(
+    *,
+    home_qpos: np.ndarray,
+    qd_cmd: np.ndarray,
+    sample_rate: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    home_qpos = np.asarray(home_qpos, dtype=np.float64).reshape(-1)
+    qd_cmd = np.asarray(qd_cmd, dtype=np.float64)
+    q_cmd = np.broadcast_to(home_qpos, qd_cmd.shape).copy()
+    if qd_cmd.shape[0] >= 2:
+        dt = 1.0 / max(float(sample_rate), 1e-9)
+        q_cmd[1:] += np.cumsum(0.5 * (qd_cmd[1:] + qd_cmd[:-1]) * dt, axis=0)
+    gradient_order = 2 if qd_cmd.shape[0] >= 3 else 1
+    qdd_cmd = np.gradient(qd_cmd, 1.0 / max(float(sample_rate), 1e-9), axis=0, edge_order=gradient_order)
+    return q_cmd, qdd_cmd
+
+
+def _generate_unbounded_excitation(
+    *,
+    home_qpos: np.ndarray,
+    torque_limits: np.ndarray,
+    duration: float,
+    sample_rate: float,
+    sweep_cycles: int,
+    speed_schedule: np.ndarray,
+    phase_offsets: np.ndarray,
+    harmonic_weights: np.ndarray,
+    reversal_pause_s: float,
+    zero_crossing_dither_s: float,
+    active_joint_mask: np.ndarray,
+) -> ReferenceTrajectory:
+    duration = max(float(duration), 1e-3)
+    sample_rate = max(float(sample_rate), 1e-3)
+    num_samples = max(int(round(duration * sample_rate)), 2)
+    t = np.linspace(0.0, duration, num_samples, endpoint=False)
+    qd_cmd = np.zeros((num_samples, home_qpos.size), dtype=np.float64)
+    phase_name = np.full(num_samples, "hold", dtype="<U32")
+
+    durations = _phase_durations(
+        duration,
+        reversal_pause_s=reversal_pause_s,
+        zero_crossing_dither_s=zero_crossing_dither_s,
+        speed_segment_count=int(np.asarray(speed_schedule).size),
+    )
+    phase_edges = np.cumsum([0.0, *durations.values()])
+    phase_edges[-1] = duration
+
+    align_mask = (t >= phase_edges[0]) & (t < phase_edges[1])
+    sweep_mask = (t >= phase_edges[1]) & (t < phase_edges[2])
+    reversal_mask = (t >= phase_edges[2]) & (t < phase_edges[3])
+    speed_mask = (t >= phase_edges[3]) & (t < phase_edges[4])
+    hold_mask = t >= phase_edges[4]
+    phase_name[align_mask] = "home_to_center"
+    phase_name[sweep_mask] = "full_range_sweep"
+    phase_name[reversal_mask] = "reversal_dither"
+    phase_name[speed_mask] = "speed_sweep"
+    phase_name[hold_mask] = "hold"
+
+    speed_schedule = np.asarray(speed_schedule, dtype=np.float64).reshape(-1)
+    harmonic_weights = np.asarray(harmonic_weights, dtype=np.float64).reshape(-1)
+    torque_limits = np.asarray(torque_limits, dtype=np.float64).reshape(-1)
+    if torque_limits.size != home_qpos.size:
+        raise ValueError("torque_limits size must match the number of joints.")
+
+    align_local_t = t[align_mask] - phase_edges[0]
+    align_duration = max(durations["home_to_center"], 1e-6)
+    align_u = align_local_t / align_duration if align_local_t.size > 0 else np.zeros(0, dtype=np.float64)
+
+    sweep_local_t = t[sweep_mask] - phase_edges[1]
+    sweep_duration = max(durations["full_range_sweep"], 1e-6)
+    sweep_u = sweep_local_t / sweep_duration if sweep_local_t.size > 0 else np.zeros(0, dtype=np.float64)
+
+    reversal_local_t = t[reversal_mask] - phase_edges[2]
+    reversal_duration = max(durations["reversal_dither"], 1e-6)
+    reversal_u = reversal_local_t / reversal_duration if reversal_local_t.size > 0 else np.zeros(0, dtype=np.float64)
+    reversal_cycles = max(
+        int(round(reversal_duration / max(2.0 * float(zero_crossing_dither_s), 1e-3))),
+        max(int(np.ceil(0.75 * float(sweep_cycles))), 3),
+    )
+
+    speed_local_t = t[speed_mask] - phase_edges[3]
+    speed_duration = max(durations["speed_sweep"], 1e-6)
+    speed_u = speed_local_t / speed_duration if speed_local_t.size > 0 else np.zeros(0, dtype=np.float64)
+    speed_cycles_curve = _build_speed_phase_cycles(speed_u, speed_schedule)
+    speed_schedule_profile = (
+        np.interp(speed_u, np.linspace(0.0, 1.0, max(speed_schedule.size, 1)), speed_schedule)
+        if speed_u.size > 0
+        else np.zeros(0, dtype=np.float64)
+    )
+
+    velocity_peaks = np.clip(1.0 + 0.085 * np.maximum(torque_limits, 0.0), 1.2, 6.0)
+    phase_radians = 2.0 * np.pi * np.mod(phase_offsets, 1.0)
+
+    for joint_idx in np.flatnonzero(active_joint_mask):
+        joint_phase = float(np.mod(phase_offsets[joint_idx], 1.0))
+        joint_phase_rad = float(phase_radians[joint_idx])
+        peak_velocity = float(velocity_peaks[joint_idx])
+
+        if align_u.size > 0:
+            align_envelope = _boundary_envelope(align_u, power=2.1)
+            align_signal = np.sin(2.0 * np.pi * (0.45 * align_u + joint_phase))
+            qd_cmd[align_mask, joint_idx] = 0.32 * peak_velocity * align_envelope * align_signal
+
+        if sweep_u.size > 0:
+            sweep_u_warp = _phase_warp(sweep_u, joint_phase=joint_phase, strength=0.06)
+            sweep_envelope = _boundary_envelope(sweep_u_warp, power=1.35)
+            sweep_signal = _chirp_wave(
+                sweep_local_t,
+                duration=sweep_duration,
+                start_cycles=max(0.85 * float(sweep_cycles), 0.75),
+                end_cycles=max(1.75 * float(sweep_cycles), 1.25),
+                phase_offset=joint_phase,
+            )
+            qd_cmd[sweep_mask, joint_idx] = peak_velocity * sweep_envelope * (
+                0.92 * sweep_signal
+                + 0.08 * _harmonic_dither(
+                    sweep_local_t,
+                    base_frequency=max(float(sweep_cycles), 1.0) / sweep_duration,
+                    harmonic_weights=harmonic_weights,
+                )
+            )
+
+        if reversal_u.size > 0:
+            reversal_u_warp = _phase_warp(reversal_u, joint_phase=joint_phase, strength=0.04)
+            reversal_envelope = _boundary_envelope(reversal_u_warp, power=1.7)
+            reversal_signal = np.tanh(
+                1.75 * np.sin(2.0 * np.pi * float(reversal_cycles) * reversal_u_warp + joint_phase_rad)
+            )
+            qd_cmd[reversal_mask, joint_idx] = 0.58 * peak_velocity * reversal_envelope * (
+                reversal_signal
+                + 0.12 * _harmonic_dither(
+                    reversal_local_t,
+                    base_frequency=max(float(reversal_cycles), 1.0) / reversal_duration,
+                    harmonic_weights=harmonic_weights,
+                )
+            )
+
+        if speed_u.size > 0:
+            speed_u_warp = _phase_warp(speed_u, joint_phase=joint_phase, strength=0.05)
+            speed_envelope = _boundary_envelope(speed_u_warp, power=1.55)
+            speed_phase_cycles = np.interp(speed_u_warp, speed_u, speed_cycles_curve)
+            speed_gain = 0.45 + 0.75 * np.interp(speed_u_warp, speed_u, speed_schedule_profile)
+            speed_signal = np.sin(2.0 * np.pi * (speed_phase_cycles + joint_phase))
+            qd_cmd[speed_mask, joint_idx] = peak_velocity * speed_gain * speed_envelope * (
+                speed_signal
+                + 0.1 * _harmonic_dither(
+                    speed_local_t,
+                    base_frequency=max(float(speed_cycles_curve[-1]), 1.0) / speed_duration,
+                    harmonic_weights=harmonic_weights,
+                )
+            )
+
+    q_cmd, qdd_cmd = _integrate_velocity_profile(
+        home_qpos=home_qpos,
+        qd_cmd=qd_cmd,
+        sample_rate=sample_rate,
+    )
+    return ReferenceTrajectory(
+        time=t,
+        q_cmd=q_cmd,
+        qd_cmd=qd_cmd,
+        qdd_cmd=qdd_cmd,
+        phase_name=phase_name,
+    )
 
 
 def build_quintic_point_to_point_trajectory(
@@ -216,7 +450,9 @@ def generate_parallel_full_range_excitation(
     *,
     home_qpos: np.ndarray,
     joint_limits: np.ndarray,
+    torque_limits: np.ndarray,
     safety_margin: float,
+    window_mode: str,
     duration: float,
     sample_rate: float,
     sweep_cycles: int,
@@ -233,20 +469,37 @@ def generate_parallel_full_range_excitation(
     t = np.linspace(0.0, duration, num_samples, endpoint=False)
 
     home_qpos = np.asarray(home_qpos, dtype=np.float64).reshape(-1)
+    torque_limits = np.asarray(torque_limits, dtype=np.float64).reshape(-1)
     phase_offsets = np.asarray(phase_offsets, dtype=np.float64).reshape(-1)
     if phase_offsets.size != home_qpos.size:
         raise ValueError("phase_offsets size must match the number of joints.")
+    if torque_limits.size != home_qpos.size:
+        raise ValueError("torque_limits size must match the number of joints.")
 
     active_joint_mask = resolve_active_joint_mask(home_qpos.size, active_joints, require_any=True)
-    lower_safe, upper_safe, limited = _safe_joint_window(joint_limits, safety_margin=safety_margin)
-    centers = 0.5 * (lower_safe + upper_safe)
-    span = np.maximum(upper_safe - lower_safe, 1e-6)
-    start_q = build_excitation_start_pose(
-        home_qpos=home_qpos,
-        excitation_centers=centers,
-        active_joints=active_joint_mask,
+    if str(window_mode).strip().lower() == "unbounded":
+        return _generate_unbounded_excitation(
+            home_qpos=home_qpos,
+            torque_limits=torque_limits,
+            duration=duration,
+            sample_rate=sample_rate,
+            sweep_cycles=sweep_cycles,
+            speed_schedule=speed_schedule,
+            phase_offsets=phase_offsets,
+            harmonic_weights=harmonic_weights,
+            reversal_pause_s=reversal_pause_s,
+            zero_crossing_dither_s=zero_crossing_dither_s,
+            active_joint_mask=active_joint_mask,
+        )
+
+    lower_window, upper_window, limited = resolve_joint_window(
+        joint_limits,
+        safety_margin=safety_margin,
+        window_mode=window_mode,
     )
-    q_cmd = np.broadcast_to(start_q, (num_samples, home_qpos.size)).copy()
+    centers = 0.5 * (lower_window + upper_window)
+    span = np.maximum(upper_window - lower_window, 1e-6)
+    q_cmd = np.broadcast_to(home_qpos, (num_samples, home_qpos.size)).copy()
     phase_name = np.full(num_samples, "hold", dtype="<U32")
 
     durations = _phase_durations(
@@ -263,7 +516,7 @@ def generate_parallel_full_range_excitation(
     reversal_mask = (t >= phase_edges[2]) & (t < phase_edges[3])
     speed_mask = (t >= phase_edges[3]) & (t < phase_edges[4])
     hold_mask = t >= phase_edges[4]
-    phase_name[align_mask] = "center_hold"
+    phase_name[align_mask] = "home_to_center"
     phase_name[sweep_mask] = "full_range_sweep"
     phase_name[reversal_mask] = "reversal_dither"
     phase_name[speed_mask] = "speed_sweep"
@@ -271,7 +524,10 @@ def generate_parallel_full_range_excitation(
 
     speed_schedule = np.asarray(speed_schedule, dtype=np.float64).reshape(-1)
     harmonic_weights = np.asarray(harmonic_weights, dtype=np.float64).reshape(-1)
-    align_ratio = np.full(np.count_nonzero(align_mask), 0.5, dtype=np.float64)
+    align_local_t = t[align_mask] - phase_edges[0]
+    align_duration = max(durations["home_to_center"], 1e-6)
+    align_u = align_local_t / align_duration
+    align_blend = _smootherstep(align_u) if align_local_t.size > 0 else np.zeros(0, dtype=np.float64)
 
     sweep_local_t = t[sweep_mask] - phase_edges[1]
     sweep_duration = max(durations["full_range_sweep"], 1e-6)
@@ -281,70 +537,77 @@ def generate_parallel_full_range_excitation(
     reversal_duration = max(durations["reversal_dither"], 1e-6)
     reversal_u = reversal_local_t / reversal_duration
     reversal_cycles = max(
-        int(round(reversal_duration / max(float(zero_crossing_dither_s), 1e-3))),
-        max(int(sweep_cycles), 2),
+        int(round(reversal_duration / max(3.0 * float(zero_crossing_dither_s), 1e-3))),
+        max(int(np.ceil(0.5 * float(sweep_cycles))), 2),
     )
 
     speed_local_t = t[speed_mask] - phase_edges[3]
     speed_duration = max(durations["speed_sweep"], 1e-6)
+    speed_u = speed_local_t / speed_duration if speed_local_t.size > 0 else np.zeros(0, dtype=np.float64)
+    speed_cycles_curve = _build_speed_phase_cycles(speed_u, speed_schedule)
 
     for joint_idx in np.flatnonzero(active_joint_mask):
         joint_phase = float(np.mod(phase_offsets[joint_idx], 1.0))
+        joint_direction = 1.0 if np.cos(2.0 * np.pi * joint_phase) >= 0.0 else -1.0
         joint_center = centers[joint_idx]
         joint_span = span[joint_idx]
-        joint_lower = lower_safe[joint_idx]
-        joint_upper = upper_safe[joint_idx]
+        joint_lower = lower_window[joint_idx]
+        joint_upper = upper_window[joint_idx]
 
-        if align_ratio.size > 0:
-            q_cmd[align_mask, joint_idx] = joint_center
+        if align_blend.size > 0:
+            q_cmd[align_mask, joint_idx] = home_qpos[joint_idx] + align_blend * (joint_center - home_qpos[joint_idx])
 
         if sweep_u.size > 0:
-            sweep_ratio = _triangle_wave(sweep_cycles * sweep_u + joint_phase)
-            sweep_dither = 0.04 * _harmonic_dither(
+            sweep_u_warp = _phase_warp(sweep_u, joint_phase=joint_phase, strength=0.045)
+            sweep_envelope = _boundary_envelope(sweep_u_warp, power=2.0)
+            sweep_ratio = _smootherstep(
+                0.5 + 0.5 * joint_direction * np.sin(2.0 * np.pi * float(sweep_cycles) * sweep_u_warp)
+            )
+            sweep_ratio += sweep_envelope * 0.02 * _chirp_wave(
+                sweep_local_t,
+                duration=sweep_duration,
+                start_cycles=max(0.75 * float(sweep_cycles), 0.75),
+                end_cycles=max(1.55 * float(sweep_cycles), 1.25),
+                phase_offset=joint_phase,
+            )
+            sweep_ratio += sweep_envelope * 0.015 * _harmonic_dither(
                 sweep_local_t,
                 base_frequency=max(float(sweep_cycles), 1.0) / sweep_duration,
                 harmonic_weights=harmonic_weights,
             )
             q_cmd[sweep_mask, joint_idx] = joint_lower + joint_span * np.clip(
-                sweep_ratio + sweep_dither,
+                sweep_ratio,
                 0.0,
                 1.0,
             )
 
         if reversal_u.size > 0:
-            endpoint = (_triangle_wave(0.5 * reversal_cycles * reversal_u + joint_phase) >= 0.5).astype(np.float64)
-            reversal_wave = np.sin(2.0 * np.pi * reversal_cycles * reversal_u + 2.0 * np.pi * joint_phase)
-            reversal_ratio = np.clip(endpoint + 0.08 * reversal_wave, 0.0, 1.0)
+            reversal_u_warp = _phase_warp(reversal_u, joint_phase=joint_phase, strength=0.035)
+            reversal_envelope = _boundary_envelope(reversal_u_warp, power=1.8)
+            reversal_ratio = 0.5 + 0.18 * joint_direction * reversal_envelope * np.tanh(
+                1.8 * np.sin(2.0 * np.pi * float(reversal_cycles) * reversal_u_warp)
+            )
+            reversal_ratio += reversal_envelope * 0.012 * _harmonic_dither(
+                reversal_local_t,
+                base_frequency=max(float(reversal_cycles), 1.0) / reversal_duration,
+                harmonic_weights=harmonic_weights,
+            )
+            reversal_ratio = np.clip(reversal_ratio, 0.0, 1.0)
             q_cmd[reversal_mask, joint_idx] = joint_lower + joint_span * reversal_ratio
 
         if speed_local_t.size > 0:
-            start_idx = 0
-            segment_edges = np.linspace(0.0, speed_duration, speed_schedule.size + 1)
-            for segment_idx, speed_scale in enumerate(speed_schedule):
-                end_idx = int(
-                    np.searchsorted(speed_local_t, segment_edges[segment_idx + 1], side="left")
-                    if segment_idx + 1 < segment_edges.size - 1
-                    else speed_local_t.size
-                )
-                if end_idx <= start_idx:
-                    continue
-                segment_t = speed_local_t[start_idx:end_idx] - segment_edges[segment_idx]
-                segment_duration = max(segment_edges[segment_idx + 1] - segment_edges[segment_idx], 1e-6)
-                cycles = max(0.35, 0.55 + 1.8 * float(speed_scale))
-                segment_ratio = 0.5 + 0.44 * np.sin(
-                    2.0 * np.pi * cycles * segment_t / segment_duration + 2.0 * np.pi * joint_phase
-                )
-                segment_ratio += 0.05 * _harmonic_dither(
-                    segment_t,
-                    base_frequency=max(cycles, 0.2) / segment_duration,
-                    harmonic_weights=harmonic_weights,
-                )
-                q_cmd[np.flatnonzero(speed_mask)[start_idx:end_idx], joint_idx] = joint_lower + joint_span * np.clip(
-                    segment_ratio,
-                    0.0,
-                    1.0,
-                )
-                start_idx = end_idx
+            speed_u_warp = _phase_warp(speed_u, joint_phase=joint_phase, strength=0.05)
+            speed_envelope = _boundary_envelope(speed_u_warp, power=1.7)
+            speed_phase_cycles = np.interp(speed_u_warp, speed_u, speed_cycles_curve)
+            speed_ratio = _smootherstep(
+                0.5 + 0.5 * joint_direction * np.sin(2.0 * np.pi * speed_phase_cycles)
+            )
+            speed_ratio += speed_envelope * 0.018 * _harmonic_dither(
+                speed_local_t,
+                base_frequency=max(float(speed_cycles_curve[-1]), 1.0) / speed_duration,
+                harmonic_weights=harmonic_weights,
+            )
+            q_cmd[speed_mask, joint_idx] = joint_lower + joint_span * np.clip(speed_ratio, 0.0, 1.0)
 
         if np.any(hold_mask):
             q_cmd[hold_mask, joint_idx] = joint_center
@@ -405,7 +668,9 @@ def build_excitation_trajectory(config: Config) -> ReferenceTrajectory:
     return generate_parallel_full_range_excitation(
         home_qpos=config.robot.home_qpos,
         joint_limits=config.robot.joint_limits,
+        torque_limits=config.robot.torque_limits,
         safety_margin=config.safety.joint_limit_margin,
+        window_mode=config.identification.excitation.window_mode,
         duration=config.identification.excitation.duration,
         sample_rate=config.sampling.rate,
         sweep_cycles=config.identification.excitation.sweep_cycles,
@@ -419,11 +684,8 @@ def build_excitation_trajectory(config: Config) -> ReferenceTrajectory:
 
 
 def build_startup_pose(config: Config, excitation_reference: ReferenceTrajectory) -> np.ndarray:
-    return build_excitation_start_pose(
-        home_qpos=config.robot.home_qpos,
-        excitation_centers=excitation_reference.q_cmd[0],
-        active_joints=config.active_joint_mask,
-    )
+    _ = excitation_reference
+    return np.asarray(config.robot.home_qpos, dtype=np.float64).copy()
 
 
 __all__ = [
@@ -435,6 +697,7 @@ __all__ = [
     "build_startup_pose",
     "generate_parallel_full_range_excitation",
     "resolve_active_joint_mask",
+    "resolve_joint_window",
     "resolve_joint_limit_arrays",
     "sample_reference_trajectory",
 ]

@@ -34,6 +34,7 @@ from friction_identification_core.trajectory import (
     ReferenceSample,
     ReferenceTrajectory,
     build_startup_pose,
+    resolve_joint_window,
     sample_reference_trajectory,
 )
 from friction_identification_core.visualization import build_hardware_reporter, build_pose_estimator
@@ -303,7 +304,7 @@ class HardwareSource:
                 / float(self.config.sampling.rate)
             )
 
-        frame_reader = SerialFrameReader()
+        frame_reader = SerialFrameReader(max_motor_id=self.config.joint_count)
         frame_packer = TorqueCommandFramePacker()
         zero_frame = frame_packer.pack(np.zeros(self.config.joint_count, dtype=np.float32))
 
@@ -313,6 +314,7 @@ class HardwareSource:
         mos_temp = np.zeros(self.config.joint_count, dtype=np.float64)
         coil_temp = np.zeros(self.config.joint_count, dtype=np.float64)
         last_feedback_time = np.full(self.config.joint_count, np.nan, dtype=np.float64)
+        feedback_group_mask = np.zeros(self.config.joint_count, dtype=bool)
         previous_qd = np.zeros(self.config.joint_count, dtype=np.float64)
 
         time_log: list[float] = []
@@ -342,7 +344,12 @@ class HardwareSource:
 
         active_joint_mask = self.config.active_joint_mask
         active_joint_indices = np.flatnonzero(active_joint_mask)
-        safe_lower, safe_upper = safety.safe_joint_window()
+        active_window_mode = self.config.identification.excitation.window_mode
+        motion_lower, motion_upper, _ = resolve_joint_window(
+            self.config.robot.joint_limits,
+            safety_margin=self.config.safety.joint_limit_margin,
+            window_mode=active_window_mode,
+        )
         valid_sample_count = 0
 
         start_time = None
@@ -363,9 +370,17 @@ class HardwareSource:
         log_info(
             "开始真机并行运行: "
             f"mode={mode}, batch={batch_index}/{total_batches}, "
-            f"active_joints={[idx + 1 for idx in active_joint_indices]}, "
+            f"active_joints={[int(idx) + 1 for idx in active_joint_indices]}, "
             f"port={self.config.serial.port}, baudrate={self.config.serial.baudrate}"
         )
+        log_info("串口回传按 active_joints 凑齐一轮后再发送下一次控制/记录样本。")
+        if nominal_feedback_cycle_s > (command_refresh_period_s * 1.25):
+            log_info(
+                "UART 理论完整收发周期约 "
+                f"{nominal_feedback_cycle_s * 1000.0:.1f} ms "
+                f"({1.0 / nominal_feedback_cycle_s:.1f} Hz)，"
+                f"当前 sampling.rate={self.config.sampling.rate:.1f} Hz 将以串口实际反馈节奏为准。"
+            )
 
         ser = None
         try:
@@ -377,6 +392,7 @@ class HardwareSource:
             while True:
                 bytes_waiting = frame_reader.read_available(ser)
                 emitted_sample = False
+                feedback_group_ready = False
 
                 while True:
                     frame = frame_reader.pop_frame()
@@ -393,15 +409,16 @@ class HardwareSource:
                     mos_temp[idx] = frame.mos_temperature
                     coil_temp[idx] = frame.coil_temperature
                     last_feedback_time[idx] = frame_time
+                    feedback_group_mask[idx] = True
+
+                    if np.all(feedback_group_mask[active_joint_mask]):
+                        feedback_group_ready = True
+                        break
 
                 now = time.perf_counter()
-                active_feedback_times = last_feedback_time[active_joint_mask]
-                all_feedback_available = np.all(np.isfinite(active_feedback_times))
-                all_feedback_fresh = all_feedback_available and np.all(
-                    (now - active_feedback_times) < feedback_stale_timeout_s
-                )
+                feedback_group_ready = feedback_group_ready or np.all(feedback_group_mask[active_joint_mask])
 
-                if all_feedback_fresh and (
+                if feedback_group_ready and (
                     last_cycle_end is None or (now - last_cycle_end) >= command_refresh_period_s
                 ):
                     cycle_end = now
@@ -411,7 +428,7 @@ class HardwareSource:
                     cycle_period = (cycle_end - last_cycle_end) if last_cycle_end is not None else 0.0
                     last_cycle_end = cycle_end
 
-                    safety.assert_joint_limits(q)
+                    safety.assert_joint_limits(q, window_mode=active_window_mode)
 
                     if mode == "collect":
                         assert reference_state is not None
@@ -450,6 +467,7 @@ class HardwareSource:
                                     torque_limits=self.config.robot.torque_limits,
                                 )
                             ),
+                            window_mode=active_window_mode,
                         )
                         tau_command = tau_friction_comp.copy()
 
@@ -465,15 +483,15 @@ class HardwareSource:
                         qd,
                         velocity_eps=self.config.status.velocity_eps,
                     )
-                    range_ratio = compute_range_ratio(q, safe_lower, safe_upper)
-                    limit_margin_remaining = compute_limit_margin_remaining(q, safe_lower, safe_upper)
+                    range_ratio = compute_range_ratio(q, motion_lower, motion_upper)
+                    limit_margin_remaining = compute_limit_margin_remaining(q, motion_lower, motion_upper)
                     sample_valid = bool(
                         _build_residual_clean_sample_mask(
                             q=q[None, :],
                             qd=qd[None, :],
                             tau_residual=tau_residual[None, :],
-                            lower=safe_lower,
-                            upper=safe_upper,
+                            lower=motion_lower,
+                            upper=motion_upper,
                             torque_limits=self.config.robot.torque_limits,
                             active_joints=active_joint_mask,
                             min_motion_speed=max(float(self.config.fitting.min_velocity_threshold), 0.01),
@@ -488,6 +506,7 @@ class HardwareSource:
                     emitted_sample = True
                     step_index += 1
                     last_feedback_wait_log_time = None
+                    feedback_group_mask[:] = False
 
                     ee_pos = None
                     ee_quat = None
@@ -569,24 +588,25 @@ class HardwareSource:
                 if not emitted_sample:
                     now = time.perf_counter()
                     if last_command_send_time is None or (now - last_command_send_time) >= command_refresh_period_s:
-                        if not all_feedback_fresh:
+                        if not feedback_group_ready:
                             last_command_frame = zero_frame
                         ser.write(last_command_frame)
                         last_command_send_time = now
 
-                    if not all_feedback_fresh and (
+                    if not feedback_group_ready and (
                         last_feedback_wait_log_time is None
                         or (now - last_feedback_wait_log_time) >= 1.0
                     ):
-                        missing = [idx + 1 for idx in active_joint_indices if not np.isfinite(last_feedback_time[idx])]
+                        pending = [int(idx) + 1 for idx in active_joint_indices if not feedback_group_mask[idx]]
+                        missing = [idx for idx in pending if not np.isfinite(last_feedback_time[idx - 1])]
                         stale = [
-                            idx + 1
-                            for idx in active_joint_indices
-                            if np.isfinite(last_feedback_time[idx])
-                            and (now - float(last_feedback_time[idx])) >= feedback_stale_timeout_s
+                            idx
+                            for idx in pending
+                            if np.isfinite(last_feedback_time[idx - 1])
+                            and (now - float(last_feedback_time[idx - 1])) >= feedback_stale_timeout_s
                         ]
-                        detail = f"missing={missing}, stale={stale}"
-                        log_info(f"等待全轴新鲜反馈，继续发送零力矩保持安全。{detail}")
+                        detail = f"pending={pending}, missing={missing}, stale={stale}"
+                        log_info(f"等待本轮回传凑齐 active_joints，继续发送零力矩保持安全。{detail}")
                         last_feedback_wait_log_time = now
 
                     if not emitted_sample or bytes_waiting <= 0:
@@ -673,8 +693,11 @@ class HardwareSource:
         tau_rigid = dynamics.batch_inverse_dynamics(data.q, qd_filtered, qdd)
         tau_residual = data.tau_measured - tau_rigid
 
-        safety = SafetyGuard(self.config, active_joint_mask=self.config.active_joint_mask)
-        lower, upper = safety.safe_joint_window()
+        lower, upper, _ = resolve_joint_window(
+            self.config.robot.joint_limits,
+            safety_margin=self.config.safety.joint_limit_margin,
+            window_mode=self.config.identification.excitation.window_mode,
+        )
         clean_mask = _build_residual_clean_sample_mask(
             q=data.q,
             qd=qd_filtered,

@@ -1,0 +1,10 @@
+{
+  "run_label": "20260417_202910",
+  "archive_dir": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260417_202910_collect",
+  "manifest_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260417_202910_collect/run_manifest.json",
+  "summary_npz_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_summary.npz",
+  "report_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_report.md",
+  "csv_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_summary.csv",
+  "json_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/real_friction_identification_summary.json",
+  "timestamp": "2026-04-17T12:30:10+00:00"
+}

@@ -73,7 +73,12 @@ class MujocoEnvironment:
         joint_limit_overrides = np.asarray(joint_limit_overrides, dtype=np.float64)
         if joint_limit_overrides.shape != (self.config.joint_count, 2):
             raise ValueError("joint_limit_overrides must have shape [num_joints, 2].")
+        unlimited = self.config.identification.excitation.window_mode == "unbounded"
         for joint_id, limits in zip(self.joint_ids, joint_limit_overrides):
+            if unlimited:
+                self.model.jnt_limited[joint_id] = 0
+                self.inverse_model.jnt_limited[joint_id] = 0
+                continue
             self.model.jnt_limited[joint_id] = 1
             self.model.jnt_range[joint_id] = limits
             self.inverse_model.jnt_limited[joint_id] = 1

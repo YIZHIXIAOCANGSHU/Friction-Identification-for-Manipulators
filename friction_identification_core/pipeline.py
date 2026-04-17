@@ -43,6 +43,14 @@ class IdentificationPipeline:
         )
         self.results = ResultStore(config)
 
+    def _sleep_between_batches(self, delay_s: float) -> bool:
+        try:
+            time.sleep(delay_s)
+        except KeyboardInterrupt:
+            log_info("检测到人工中断，停止后续批次并保留已完成结果。")
+            return False
+        return True
+
     def _fit_batch(self, data: CollectedData) -> FrictionIdentificationResult | None:
         identification_inputs = self.source.prepare_identification(data)
         if identification_inputs is None:
@@ -104,6 +112,10 @@ class IdentificationPipeline:
                         identification_paths=identification_paths,
                     )
                 )
+                termination_reason = str(data.metadata.get("termination_reason", "completed")).strip().lower()
+                if termination_reason == "interrupted":
+                    log_info("当前批次被人工中断，停止后续批次并汇总已完成结果。")
+                    break
 
                 if mode != "collect":
                     continue
@@ -113,9 +125,10 @@ class IdentificationPipeline:
                 delay_s = max(float(self.config.batch_collection.inter_batch_delay), 0.0)
                 if delay_s > 0.0:
                     log_info(f"批次 {batch_index} 完成，等待 {delay_s:.1f} s 后开始下一批。")
-                    time.sleep(delay_s)
+                    if not self._sleep_between_batches(delay_s):
+                        break
 
-            if mode == "collect":
+            if mode == "collect" and batches:
                 summary_paths = self.results.save_summary(batches)
                 self.source.publish_summary(self.results.load_summary(summary_paths.npz_path))
             return PipelineRunResult(

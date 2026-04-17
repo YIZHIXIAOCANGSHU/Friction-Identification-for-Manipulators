@@ -52,11 +52,12 @@
 `collect` 会完成一整轮并行采集与辨识：
 
 1. 读取配置，初始化真机源、控制器、安全器、`rerun` 和 MuJoCo 姿态显示
-2. 生成 7 轴并行复合激励参考轨迹
-3. 真机闭环运行，实时记录 `q / qd / q_cmd / qd_cmd / torque / 温度 / UART`
-4. 采集后做速度滤波、刚体逆动力学、残差力矩筛样
-5. 对活跃关节独立拟合 `coulomb / viscous / offset`
-6. 保存批次结果，并在所有批次结束后输出 summary / report
+2. 上电后先回到 `robot.home_qpos`，默认就是全 0 位
+3. 按 `identification.excitation.window_mode` 生成 7 轴并行激励参考轨迹；默认 `unbounded` 模式不会做位置范围裁切，而是直接做空电机速度激励
+4. 真机闭环运行，实时记录 `q / qd / q_cmd / qd_cmd / torque / 温度 / UART`
+5. 采集后做速度滤波、刚体逆动力学，并按同一窗口模式筛样
+6. 对活跃关节独立拟合 `coulomb / viscous / offset`
+7. 保存批次结果，并在所有批次结束后输出 summary / report
 
 ### 2. compensate
 
@@ -197,6 +198,7 @@ summary 中最关键的数据包括：
 如果后面要继续让 AI 改项目，直接按任务把入口告诉它会最快：
 
 - 改激励覆盖范围或时序：`friction_identification_core/trajectory.py`
+- 改 collect 使用安全窗口、物理窗口还是无限位空电机模式：`friction_identification_core/default.yaml` 里的 `identification.excitation.window_mode`
 - 改控制律、补偿力矩或安全限幅：`friction_identification_core/controller.py`
 - 改串口采集节奏、真机记录字段或辨识筛样：`friction_identification_core/sources/hardware.py`
 - 改 `rerun` 页面布局或新增曲线：`friction_identification_core/visualization.py`

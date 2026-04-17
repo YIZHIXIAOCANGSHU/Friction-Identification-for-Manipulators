@@ -64,8 +64,28 @@ class TorqueCommandFramePacker:
 class SerialFrameReader:
     """Incrementally decode motor feedback frames from the UART byte stream."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_motor_id: int = 7) -> None:
         self._buffer = bytearray()
+        self._max_motor_id = max(int(max_motor_id), 1)
+
+    def _is_valid_candidate(self, parsed: tuple[object, ...], *, has_following_frame: bool) -> bool:
+        if int(parsed[0]) != RECV_FRAME_HEAD:
+            return False
+
+        motor_id = int(parsed[1])
+        if not 1 <= motor_id <= self._max_motor_id:
+            return False
+
+        feedback_values = np.asarray(parsed[3:], dtype=np.float32)
+        if not np.all(np.isfinite(feedback_values)):
+            return False
+
+        # When two full frames are already buffered, a valid candidate should align
+        # with the next frame boundary as well.
+        if has_following_frame and self._buffer[RECV_FRAME_SIZE] != RECV_FRAME_HEAD:
+            return False
+
+        return True
 
     def read_available(self, ser) -> int:
         bytes_waiting = ser.in_waiting
@@ -97,6 +117,13 @@ class SerialFrameReader:
                 parsed = RECV_FRAME_STRUCT.unpack_from(self._buffer)
             except struct.error:
                 return None
+
+            if not self._is_valid_candidate(
+                parsed,
+                has_following_frame=len(self._buffer) >= (RECV_FRAME_SIZE * 2),
+            ):
+                del self._buffer[0]
+                continue
 
             del self._buffer[:RECV_FRAME_SIZE]
             return JointFeedbackFrame(

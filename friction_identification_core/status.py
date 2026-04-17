@@ -15,15 +15,27 @@ def compute_range_ratio(q: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> 
     q = np.asarray(q, dtype=np.float64)
     lower = np.asarray(lower, dtype=np.float64)
     upper = np.asarray(upper, dtype=np.float64)
-    span = np.maximum(upper - lower, 1e-9)
-    return np.clip((q - lower) / span, 0.0, 1.0)
+    lower_b = np.broadcast_to(lower, q.shape)
+    upper_b = np.broadcast_to(upper, q.shape)
+    finite_window = np.isfinite(lower_b) & np.isfinite(upper_b) & (upper_b > lower_b)
+    ratio = np.full(q.shape, 0.5, dtype=np.float64)
+    if np.any(finite_window):
+        span = np.maximum(upper_b[finite_window] - lower_b[finite_window], 1e-9)
+        ratio[finite_window] = np.clip((q[finite_window] - lower_b[finite_window]) / span, 0.0, 1.0)
+    return ratio
 
 
 def compute_limit_margin_remaining(q: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
     q = np.asarray(q, dtype=np.float64)
     lower = np.asarray(lower, dtype=np.float64)
     upper = np.asarray(upper, dtype=np.float64)
-    return np.minimum(q - lower, upper - q)
+    lower_b = np.broadcast_to(lower, q.shape)
+    upper_b = np.broadcast_to(upper, q.shape)
+    finite_window = np.isfinite(lower_b) & np.isfinite(upper_b)
+    margin = np.full(q.shape, np.nan, dtype=np.float64)
+    if np.any(finite_window):
+        margin[finite_window] = np.minimum(q[finite_window] - lower_b[finite_window], upper_b[finite_window] - q[finite_window])
+    return margin
 
 
 def format_joint_motion_summary(

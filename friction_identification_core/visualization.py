@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 _PHASE_CODE_MAP = {
     "startup_move": 0,
     "startup_settle": 1,
+    "home_to_center": 2,
     "center_hold": 2,
     "full_range_sweep": 3,
     "reversal_dither": 4,

@@ -25,6 +25,7 @@ identification:
   active_joints: [0, 1, 2, 3, 4, 5, 6]
   excitation:
     profile: "full_range_compound"
+    window_mode: "unbounded"
     duration: 90.0
     sweep_cycles: 4
     reversal_pause_s: 0.15

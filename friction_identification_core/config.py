@@ -41,6 +41,7 @@ class RobotConfig:
 @dataclass(frozen=True)
 class ExcitationConfig:
     profile: str
+    window_mode: str
     duration: float
     sweep_cycles: int
     reversal_pause_s: float
@@ -209,6 +210,7 @@ def _parse_identification_config(raw: dict[str, Any], joint_count: int) -> Ident
     excitation_raw = raw["excitation"]
     excitation = ExcitationConfig(
         profile=str(excitation_raw["profile"]),
+        window_mode=str(excitation_raw.get("window_mode", "safe")).strip().lower(),
         duration=float(excitation_raw["duration"]),
         sweep_cycles=int(excitation_raw["sweep_cycles"]),
         reversal_pause_s=float(excitation_raw["reversal_pause_s"]),
@@ -217,6 +219,8 @@ def _parse_identification_config(raw: dict[str, Any], joint_count: int) -> Ident
         speed_schedule=_as_float_array(excitation_raw["speed_schedule"]),
         phase_offsets=_as_float_array(excitation_raw["phase_offsets"], shape=(joint_count,)),
     )
+    if excitation.window_mode not in {"safe", "hard", "unbounded"}:
+        raise ValueError("identification.excitation.window_mode must be 'safe', 'hard', or 'unbounded'.")
     if excitation.harmonic_weights.size == 0:
         raise ValueError("identification.excitation.harmonic_weights must not be empty.")
     if excitation.speed_schedule.size == 0:

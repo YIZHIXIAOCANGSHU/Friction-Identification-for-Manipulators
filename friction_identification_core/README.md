@@ -44,6 +44,7 @@
 ## 常见修改入口
 
 - 想改轨迹覆盖、错相、速度计划：`trajectory.py`
+- 想切换 collect 用安全窗口、物理窗口还是无限位空电机模式：`default.yaml` 里的 `identification.excitation.window_mode`
 - 想改控制器或补偿力矩：`controller.py`
 - 想改 `rerun` 页面布局或新增监控量：`visualization.py`
 - 想改 summary 结构或报告内容：`results.py`
@@ -53,6 +54,8 @@
 
 - 只维护真机主链路
 - 默认所有 7 个关节并行激活
+- `collect` 上电后默认先回 `robot.home_qpos`，当前默认就是全 0 位
+- 默认 `collect` 使用 `window_mode: unbounded` 做无限位空电机速度激励和筛样
 - `collect` 输出批次数据和 summary
 - `compensate` 从 summary 中读取摩擦参数做补偿验证
 - `compare` 读取 `results/runs/` 的历史 collect 归档并生成对比报告

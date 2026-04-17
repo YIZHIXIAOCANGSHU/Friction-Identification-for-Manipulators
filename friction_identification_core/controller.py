@@ -38,30 +38,67 @@ class SafetyGuard:
     def hard_joint_window(self) -> tuple[np.ndarray, np.ndarray]:
         return self.joint_limits[:, 0].copy(), self.joint_limits[:, 1].copy()
 
-    def check_joint_limits(self, q: np.ndarray, *, use_safe_margin: bool = False) -> bool:
-        lower, upper = self.safe_joint_window() if use_safe_margin else self.hard_joint_window()
+    def resolve_joint_window(self, *, window_mode: str = "safe") -> tuple[np.ndarray, np.ndarray]:
+        mode = str(window_mode).strip().lower()
+        if mode == "safe":
+            return self.safe_joint_window()
+        if mode == "hard":
+            return self.hard_joint_window()
+        if mode == "unbounded":
+            return (
+                np.full(len(self.joint_names), -np.inf, dtype=np.float64),
+                np.full(len(self.joint_names), np.inf, dtype=np.float64),
+            )
+        raise ValueError(f"Unsupported joint window mode: {window_mode}")
+
+    def check_joint_limits(
+        self,
+        q: np.ndarray,
+        *,
+        use_safe_margin: bool = False,
+        window_mode: str | None = None,
+    ) -> bool:
+        mode = str(window_mode).strip().lower() if window_mode is not None else ("safe" if use_safe_margin else "hard")
+        if mode == "unbounded":
+            return True
+        lower, upper = self.resolve_joint_window(window_mode=mode)
         q = np.asarray(q, dtype=np.float64).reshape(-1)
         within = (q >= lower) & (q <= upper)
         within[~self.active_joint_mask] = True
         return bool(np.all(within))
 
-    def get_violation_message(self, q: np.ndarray, *, use_safe_margin: bool = False) -> str | None:
+    def get_violation_message(
+        self,
+        q: np.ndarray,
+        *,
+        use_safe_margin: bool = False,
+        window_mode: str | None = None,
+    ) -> str | None:
         q = np.asarray(q, dtype=np.float64).reshape(-1)
-        lower, upper = self.safe_joint_window() if use_safe_margin else self.hard_joint_window()
+        mode = str(window_mode).strip().lower() if window_mode is not None else ("safe" if use_safe_margin else "hard")
+        if mode == "unbounded":
+            return None
+        lower, upper = self.resolve_joint_window(window_mode=mode)
         violation = np.flatnonzero((q < lower) | (q > upper))
         violation = violation[self.active_joint_mask[violation]]
         if violation.size == 0:
             return None
         joint_idx = int(violation[0])
-        range_label = "安全关节范围" if use_safe_margin else "物理关节范围"
+        range_label = "安全关节范围" if mode == "safe" else "物理关节范围"
         return (
             f"{self.joint_names[joint_idx]} 超出{range_label}: "
             f"q={q[joint_idx]:.6f} rad, "
             f"range=[{lower[joint_idx]:.6f}, {upper[joint_idx]:.6f}]"
         )
 
-    def assert_joint_limits(self, q: np.ndarray, *, use_safe_margin: bool = False) -> None:
-        message = self.get_violation_message(q, use_safe_margin=use_safe_margin)
+    def assert_joint_limits(
+        self,
+        q: np.ndarray,
+        *,
+        use_safe_margin: bool = False,
+        window_mode: str | None = None,
+    ) -> None:
+        message = self.get_violation_message(q, use_safe_margin=use_safe_margin, window_mode=window_mode)
         if message is not None:
             raise RuntimeError(message)
 
@@ -71,13 +108,19 @@ class SafetyGuard:
             return tau.copy()
         return np.clip(tau, -self.torque_limits, self.torque_limits)
 
-    def soften_torque_near_joint_limits(self, q: np.ndarray, tau: np.ndarray) -> np.ndarray:
+    def soften_torque_near_joint_limits(
+        self,
+        q: np.ndarray,
+        tau: np.ndarray,
+        *,
+        window_mode: str = "safe",
+    ) -> np.ndarray:
         q = np.asarray(q, dtype=np.float64).reshape(-1)
         tau = np.asarray(tau, dtype=np.float64).reshape(-1).copy()
         if self.soft_limit_zone <= 1e-9:
             return tau
 
-        lower, upper = self.safe_joint_window()
+        lower, upper = self.resolve_joint_window(window_mode=window_mode)
         for joint_idx, active in enumerate(self.active_joint_mask):
             if not active:
                 continue
@@ -131,7 +174,11 @@ class FrictionIdentificationController:
 
         if self.safety is not None:
             tau = self.safety.clamp_torque(tau)
-            tau = self.safety.soften_torque_near_joint_limits(q_curr, tau)
+            tau = self.safety.soften_torque_near_joint_limits(
+                q_curr,
+                tau,
+                window_mode=self.config.identification.excitation.window_mode,
+            )
         return tau_ff.copy(), tau_fb.copy(), tau.copy()
 
 
