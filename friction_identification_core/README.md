@@ -55,3 +55,4 @@
 - 默认所有 7 个关节并行激活
 - `collect` 输出批次数据和 summary
 - `compensate` 从 summary 中读取摩擦参数做补偿验证
+- `compare` 读取 `results/runs/` 的历史 collect 归档并生成对比报告

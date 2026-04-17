@@ -29,11 +29,13 @@ from friction_identification_core.pipeline import (
     run_hardware,
 )
 from friction_identification_core.results import (
+    ArchivedRunSummary,
     IdentificationResults,
     JointResult,
     ResultPaths,
     ResultsManager,
     ResultStore,
+    compare_saved_runs,
 )
 from friction_identification_core.sources import HardwareSource, build_source
 from friction_identification_core.status import (
@@ -50,6 +52,7 @@ from friction_identification_core.trajectory import (
 
 __all__ = [
     "BatchRunArtifact",
+    "ArchivedRunSummary",
     "CollectedData",
     "Config",
     "DEFAULT_CONFIG_PATH",
@@ -72,6 +75,7 @@ __all__ = [
     "SafetyGuard",
     "build_friction_regression_matrix",
     "build_source",
+    "compare_saved_runs",
     "compute_limit_margin_remaining",
     "compute_range_ratio",
     "compute_rotation_state",

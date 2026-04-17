@@ -22,13 +22,15 @@ print_usage() {
     cat <<EOF
 Usage:
   ./run.sh
-  ./run.sh [collect|compensate] [extra args]
+  ./run.sh [collect|compensate|compare] [extra args]
   ./run.sh help
 
 Examples:
   ./run.sh
   ./run.sh collect
   ./run.sh compensate --output results/debug
+  ./run.sh compare
+  ./run.sh compare --compare-all
 EOF
 }
 
@@ -81,7 +83,7 @@ save_history() {
 }
 
 show_menu() {
-    local prompt_options="1-2/c/q"
+    local prompt_options="1-3/c/q"
     if [[ -t 1 ]] && command -v clear >/dev/null 2>&1; then
         clear
     fi
@@ -95,11 +97,12 @@ show_menu() {
     echo -e "  ${CYAN}[真机]${NC}"
     echo -e "    ${GREEN}1)${NC} collect      7轴并行采集 + 并行辨识"
     echo -e "    ${GREEN}2)${NC} compensate   仅发送摩擦补偿力矩验证"
+    echo -e "    ${GREEN}3)${NC} compare      对比多次启动之间的辨识结果"
     echo ""
     echo -e "  ${CYAN}[设置]${NC}"
     echo -e "    ${YELLOW}c)${NC} 切换配置文件 ${BLUE}(当前: $(relative_path "$CONFIG_FILE"))${NC}"
     if [ -n "$LAST_MODE" ]; then
-        prompt_options="1-2/c/r/q"
+        prompt_options="1-3/c/r/q"
         echo -e "    ${YELLOW}r)${NC} 重复上次 ${BLUE}($LAST_MODE, 配置: $(relative_path "${LAST_CONFIG_FILE:-$CONFIG_FILE}"))${NC}"
     fi
     echo -e "    ${YELLOW}q)${NC} 退出"
@@ -160,6 +163,12 @@ main() {
             run_command "$mode" "$@"
             exit $?
             ;;
+        compare)
+            local mode="$1"
+            shift
+            run_command "$mode" "$@"
+            exit $?
+            ;;
         *)
             fatal "Unknown mode: $1"
             ;;
@@ -172,6 +181,7 @@ main() {
         case "$choice" in
             1) run_command "collect"; break ;;
             2) run_command "compensate"; break ;;
+            3) run_command "compare"; break ;;
             c|C) select_config ;;
             r|R)
                 if [ -n "$LAST_MODE" ]; then

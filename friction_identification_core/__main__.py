@@ -30,14 +30,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("collect", "compensate"),
+        choices=("collect", "compensate", "compare"),
         default="collect",
-        help="Run parallel collection/identification or friction-only compensation validation.",
+        help="Run parallel collection/identification, compensation validation, or cross-run comparison.",
     )
     parser.add_argument(
         "--output",
         default=None,
         help="Optional output directory override.",
+    )
+    parser.add_argument(
+        "--compare-limit",
+        type=int,
+        default=5,
+        help="Number of archived collect runs to include in compare mode.",
+    )
+    parser.add_argument(
+        "--compare-all",
+        action="store_true",
+        help="Compare all archived collect runs instead of only the latest ones.",
     )
     return parser
 
@@ -48,6 +59,19 @@ def main(argv: list[str] | None = None) -> None:
 
     config = load_config(args.config)
     config = _apply_overrides(config, output=args.output)
+
+    if args.mode == "compare":
+        from friction_identification_core.results import compare_saved_runs
+
+        try:
+            compare_saved_runs(
+                config,
+                limit=args.compare_limit,
+                compare_all=bool(args.compare_all),
+            )
+        except FileNotFoundError as exc:
+            raise SystemExit(f"[ERROR] {exc}") from exc
+        return
 
     from friction_identification_core.pipeline import run_hardware
 

@@ -6,6 +6,7 @@
 - 采集阶段并行控制、并行采样、并行辨识
 - 补偿验证阶段只发送摩擦补偿力矩
 - `rerun` 实时展示运动、力矩、状态和辨识结果
+- 每次运行自动归档，支持跨多次启动做结果对比
 
 ## 给新 AI 的最快入口
 
@@ -33,7 +34,7 @@
 
 - `hardware only`，不再维护仿真主链路
 - 默认激活 7 个关节并行辨识
-- 只有两个运行模式：`collect` 和 `compensate`
+- 当前有三个运行模式：`collect`、`compensate`、`compare`
 - `rerun` 是主调试入口，MuJoCo 只负责姿态/末端位姿可视化
 
 已经移除或不再作为主路径维护的内容：
@@ -65,6 +66,15 @@
 2. 真机运行补偿模式
 3. 记录补偿期的关节状态和力矩状态
 4. 输出补偿验证数据文件
+
+### 3. compare
+
+`compare` 会读取历史归档的 collect 结果，生成跨运行对比报告：
+
+1. 扫描 `results/runs/` 下的历史 collect 归档
+2. 读取每次运行的 summary
+3. 生成 Markdown 和 CSV 对比报告
+4. 默认比较最近 5 次，可通过 `--compare-all` 比较全部归档
 
 ## 代码地图
 
@@ -126,6 +136,7 @@
 ```bash
 ./run.sh collect
 ./run.sh compensate
+./run.sh compare
 ```
 
 底层 CLI：
@@ -133,6 +144,8 @@
 ```bash
 python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode collect
 python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode compensate
+python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode compare
+python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode compare --compare-all
 python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode collect --output results/debug
 ```
 
@@ -140,16 +153,30 @@ python3 -m friction_identification_core --config friction_identification_core/de
 
 默认输出目录由 `output.results_dir` 指定，当前默认是 `results/`。
 
+当前输出分成两层：
+
+- `results/`
+  - 保存“最新一次”的便捷入口，方便补偿模式直接读取
+- `results/runs/<timestamp>_<mode>/`
+  - 保存每次启动的独立归档，便于回看和 compare
+- `results/comparisons/`
+  - 保存跨运行对比生成的 Markdown / CSV
+
 核心产物：
 
 - `hardware_capture_batch_01.npz`
 - `hardware_capture_batch_02.npz`
 - `hardware_identification_batch_01.npz`
 - `hardware_identification_summary.npz`
+- `hardware_identification_summary.csv`
 - `hardware_identification_report.md`
 - `hardware_compensation_validation.npz`
 - `real_friction_identification_summary.json`
   - legacy 汇总文件，方便兼容旧流程
+- `runs/20260417_153000_collect/`
+  - 某次 collect 的完整归档目录
+- `comparisons/identification_compare_latest.md`
+- `comparisons/identification_compare_latest.csv`
 
 summary 中最关键的数据包括：
 
@@ -158,6 +185,12 @@ summary 中最关键的数据包括：
 - `valid_sample_ratio / sample_count`
 - `batch_coulomb / batch_viscous / batch_offset`
 - `batch_validation_rmse / batch_validation_r2`
+
+可直接阅读的文件优先级建议：
+
+1. `hardware_identification_report.md`
+2. `hardware_identification_summary.csv`
+3. `real_friction_identification_summary.json`
 
 ## 常见改动入口
 

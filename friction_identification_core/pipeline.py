@@ -69,6 +69,7 @@ class IdentificationPipeline:
         batches: list[BatchRunArtifact] = []
         summary_paths = None
         total_batches = self.config.batch_collection.num_batches if mode == "collect" else 1
+        self.results.begin_run(mode=mode, total_batches=total_batches)
 
         try:
             for batch_index in range(1, total_batches + 1):

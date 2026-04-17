@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import csv
 import json
+import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -13,11 +15,21 @@ from friction_identification_core.models import CollectedData, FrictionIdentific
 from friction_identification_core.runtime import ensure_directory, log_info, write_json
 
 
+RUNS_DIRNAME = "runs"
+COMPARISONS_DIRNAME = "comparisons"
+RUN_MANIFEST_FILENAME = "run_manifest.json"
+LATEST_COLLECT_MANIFEST_FILENAME = "latest_collect_manifest.json"
+LATEST_COMPARISON_MANIFEST_FILENAME = "latest_comparison_manifest.json"
+
+
 @dataclass(frozen=True)
 class ResultPaths:
-    npz_path: Path
+    npz_path: Path | None = None
     json_path: Path | None = None
     report_path: Path | None = None
+    csv_path: Path | None = None
+    manifest_path: Path | None = None
+    archive_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +62,20 @@ class IdentificationResults:
     batch_sample_count: np.ndarray | None = None
 
 
+@dataclass(frozen=True)
+class ArchivedRunSummary:
+    run_label: str
+    mode: str
+    timestamp: str
+    batch_count: int
+    archive_dir: Path
+    summary_path: Path
+    report_path: Path | None
+    csv_path: Path | None
+    manifest_path: Path
+    summary: IdentificationResults
+
+
 def build_validation_mask(num_samples: int) -> np.ndarray:
     mask = np.zeros(num_samples, dtype=bool)
     if num_samples > 0:
@@ -62,6 +88,10 @@ def build_validation_mask(num_samples: int) -> np.ndarray:
 
 def _now_iso8601() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _filesystem_timestamp() -> str:
+    return datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
 
 
 def _normalize_json_value(value: Any) -> Any:
@@ -108,21 +138,96 @@ def _safe_nanstd(values: np.ndarray, axis: int) -> np.ndarray:
     return np.sqrt(np.nan_to_num(variance, nan=0.0))
 
 
+def _mean_of_finite(values: Iterable[float]) -> float:
+    array = np.asarray(list(values), dtype=np.float64)
+    finite = array[np.isfinite(array)]
+    if finite.size == 0:
+        return float("nan")
+    return float(np.mean(finite))
+
+
+def _summary_csv_filename(config: Config) -> str:
+    return f"{Path(config.output.hardware_summary_filename).stem}.csv"
+
+
+def _summary_readable_json_filename(config: Config) -> str:
+    return config.output.legacy_summary_filename
+
+
 class ResultsManager:
     """Batch-oriented result storage for hardware parallel identification."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
         self.results_dir = ensure_directory(config.results_dir)
+        self.archive_root = ensure_directory(self.results_dir / RUNS_DIRNAME)
+        self.comparison_root = ensure_directory(self.results_dir / COMPARISONS_DIRNAME)
+        self.run_label = _filesystem_timestamp()
+        self.run_started_at = _now_iso8601()
+        self.run_mode: str | None = None
+        self.run_dir: Path | None = None
+        self.manifest_path: Path | None = None
+        self._manifest: dict[str, Any] = {}
+
+    def begin_run(self, *, mode: str, total_batches: int) -> Path:
+        if self.run_dir is not None:
+            return self.run_dir
+        if mode == "collect":
+            self._archive_existing_latest_collect_if_needed()
+        self.run_mode = str(mode)
+        self.run_dir = ensure_directory(self.archive_root / f"{self.run_label}_{mode}")
+        self.manifest_path = self.run_dir / RUN_MANIFEST_FILENAME
+        self._manifest = {
+            "run_label": self.run_label,
+            "mode": self.run_mode,
+            "started_at": self.run_started_at,
+            "total_batches": int(total_batches),
+            "config_path": str(self.config.config_path),
+            "results_root": str(self.results_dir),
+            "archive_dir": str(self.run_dir),
+            "summary_npz_path": None,
+            "summary_report_path": None,
+            "summary_csv_path": None,
+            "summary_json_path": None,
+            "comparison_report_path": None,
+            "comparison_csv_path": None,
+            "collection_batches": [],
+            "identification_batches": [],
+            "compensation_validation_path": None,
+        }
+        self._write_manifest()
+        log_info(f"本次运行已归档到: {self.run_dir}")
+        return self.run_dir
 
     def capture_batch_path(self, batch_index: int) -> Path:
-        return self.results_dir / f"{self.config.output.hardware_capture_prefix}_batch_{batch_index:02d}.npz"
+        return self._require_run_dir() / f"{self.config.output.hardware_capture_prefix}_batch_{batch_index:02d}.npz"
 
     def identification_batch_path(self, batch_index: int) -> Path:
-        return self.results_dir / f"{self.config.output.hardware_ident_prefix}_batch_{batch_index:02d}.npz"
+        return self._require_run_dir() / f"{self.config.output.hardware_ident_prefix}_batch_{batch_index:02d}.npz"
 
     def compensation_validation_path(self) -> Path:
-        return self.config.compensation_validation_path
+        return self._require_run_dir() / self.config.output.hardware_compensation_filename
+
+    def active_summary_path(self) -> Path:
+        return self._require_run_dir() / self.config.output.hardware_summary_filename
+
+    def active_report_path(self) -> Path:
+        return self._require_run_dir() / self.config.output.hardware_report_filename
+
+    def active_summary_csv_path(self) -> Path:
+        return self._require_run_dir() / _summary_csv_filename(self.config)
+
+    def active_summary_json_path(self) -> Path:
+        return self._require_run_dir() / _summary_readable_json_filename(self.config)
+
+    def latest_collect_manifest_path(self) -> Path:
+        return self.results_dir / LATEST_COLLECT_MANIFEST_FILENAME
+
+    def latest_comparison_manifest_path(self) -> Path:
+        return self.results_dir / LATEST_COMPARISON_MANIFEST_FILENAME
+
+    def latest_summary_csv_path(self) -> Path:
+        return self.results_dir / _summary_csv_filename(self.config)
 
     def save_collection(
         self,
@@ -131,6 +236,7 @@ class ResultsManager:
         batch_index: int,
         total_batches: int,
     ) -> ResultPaths:
+        self.begin_run(mode=data.mode, total_batches=total_batches)
         if data.mode == "compensate":
             path = self.compensation_validation_path()
         else:
@@ -138,7 +244,16 @@ class ResultsManager:
         payload = self._serialize_collection(data, batch_index=batch_index, total_batches=total_batches)
         np.savez(path, **payload)
         log_info(f"批次数据已保存: {path}")
-        return ResultPaths(npz_path=path)
+        if data.mode == "compensate":
+            latest_validation = self.results_dir / self.config.output.hardware_compensation_filename
+            self._mirror_file(path, latest_validation)
+            self._manifest["compensation_validation_path"] = str(path)
+        else:
+            collection_batches = list(self._manifest.get("collection_batches", []))
+            collection_batches.append(str(path))
+            self._manifest["collection_batches"] = collection_batches
+        self._write_manifest()
+        return ResultPaths(npz_path=path, manifest_path=self.manifest_path, archive_dir=self.run_dir)
 
     def save_identification(
         self,
@@ -150,6 +265,7 @@ class ResultsManager:
     ) -> ResultPaths | None:
         if result is None:
             return None
+        self.begin_run(mode=data.mode, total_batches=total_batches)
         path = self.identification_batch_path(batch_index)
         payload = self._serialize_identification(
             data,
@@ -159,9 +275,14 @@ class ResultsManager:
         )
         np.savez(path, **payload)
         log_info(f"批次辨识结果已保存: {path}")
-        return ResultPaths(npz_path=path)
+        identification_batches = list(self._manifest.get("identification_batches", []))
+        identification_batches.append(str(path))
+        self._manifest["identification_batches"] = identification_batches
+        self._write_manifest()
+        return ResultPaths(npz_path=path, manifest_path=self.manifest_path, archive_dir=self.run_dir)
 
     def save_summary(self, batches: list[Any]) -> ResultPaths:
+        self.begin_run(mode="collect", total_batches=len(batches))
         timestamp = _now_iso8601()
         identified_batches = [batch for batch in batches if batch.identification is not None]
         joint_count = self.config.joint_count
@@ -207,14 +328,23 @@ class ResultsManager:
         identified_mask = np.zeros(joint_count, dtype=bool)
         identified_mask[self.config.active_joint_indices] = np.isfinite(coulomb[self.config.active_joint_indices])
 
+        summary_path = self.active_summary_path()
+        csv_path = self.active_summary_csv_path()
+        json_path = self.active_summary_json_path()
+        report_path = self.active_report_path()
+
         summary_payload = {
             "metadata": _json_blob(
                 {
                     "timestamp": timestamp,
+                    "run_label": self.run_label,
+                    "mode": self.run_mode,
                     "batch_count": batch_count,
                     "joint_names": list(self.config.robot.joint_names),
                     "active_joints": list(self.config.identification.active_joints),
                     "config_path": str(self.config.config_path),
+                    "results_root": str(self.results_dir),
+                    "archive_dir": str(self.run_dir),
                     "config_snapshot": _normalize_json_value(asdict(self.config)),
                 }
             ),
@@ -237,42 +367,98 @@ class ResultsManager:
             "batch_sample_count": batch_sample_count,
             "batch_valid_sample_ratio": batch_valid_ratio,
         }
-        np.savez(self.config.summary_path, **summary_payload)
+        np.savez(summary_path, **summary_payload)
 
-        legacy_json = {
-            "timestamp": timestamp,
-            "batch_count": batch_count,
-            "joint_names": list(self.config.robot.joint_names),
-            "active_joints": list(self.config.identification.active_joints),
-            "estimated_coulomb": np.nan_to_num(coulomb, nan=0.0).tolist(),
-            "estimated_viscous": np.nan_to_num(viscous, nan=0.0).tolist(),
-            "estimated_offset": np.nan_to_num(offset, nan=0.0).tolist(),
-            "validation_rmse": _normalize_json_value(validation_rmse),
-            "validation_r2": _normalize_json_value(validation_r2),
-            "valid_sample_ratio": _normalize_json_value(valid_sample_ratio),
-            "coulomb_consistency_std": _normalize_json_value(coulomb_std),
-            "viscous_consistency_std": _normalize_json_value(viscous_std),
-            "offset_consistency_std": _normalize_json_value(offset_std),
-        }
-        json_path = write_json(self.results_dir / self.config.output.legacy_summary_filename, legacy_json)
-        report_path = self._write_summary_report(
-            timestamp=timestamp,
-            batch_count=batch_count,
+        joint_rows = self._build_joint_rows(
             coulomb=coulomb,
             viscous=viscous,
             offset=offset,
             validation_rmse=validation_rmse,
             validation_r2=validation_r2,
             valid_sample_ratio=valid_sample_ratio,
+            sample_count=sample_count,
+            identified_mask=identified_mask,
             coulomb_std=coulomb_std,
             viscous_std=viscous_std,
             offset_std=offset_std,
         )
-        log_info(f"汇总结果已保存: {self.config.summary_path}")
+        summary_json = self._build_summary_json(
+            timestamp=timestamp,
+            batch_count=batch_count,
+            joint_rows=joint_rows,
+            summary_path=summary_path,
+            report_path=report_path,
+            csv_path=csv_path,
+            batch_coulomb=batch_coulomb,
+            batch_viscous=batch_viscous,
+            batch_offset=batch_offset,
+            batch_validation_rmse=batch_rmse,
+            batch_validation_r2=batch_r2,
+            batch_valid_ratio=batch_valid_ratio,
+        )
+        json_path = write_json(json_path, summary_json)
+        csv_path = self._write_summary_csv(csv_path, joint_rows)
+        report_path = self._write_summary_report(
+            timestamp=timestamp,
+            batch_count=batch_count,
+            summary_path=summary_path,
+            json_path=json_path,
+            csv_path=csv_path,
+            joint_rows=joint_rows,
+        )
+
+        latest_summary_path = self._mirror_file(summary_path, self.config.summary_path)
+        latest_csv_path = self._mirror_file(csv_path, self.latest_summary_csv_path())
+        latest_report_path = self._mirror_file(report_path, self.config.report_path)
+        latest_json_payload = dict(summary_json)
+        latest_json_payload.update(
+            {
+                "summary_npz_path": str(latest_summary_path),
+                "report_path": str(latest_report_path),
+                "csv_path": str(latest_csv_path),
+                "latest_collect_manifest_path": str(self.latest_collect_manifest_path()),
+            }
+        )
+        latest_json_path = write_json(self.results_dir / self.config.output.legacy_summary_filename, latest_json_payload)
+
+        self._manifest.update(
+            {
+                "summary_npz_path": str(summary_path),
+                "summary_report_path": str(report_path),
+                "summary_csv_path": str(csv_path),
+                "summary_json_path": str(json_path),
+                "latest_summary_npz_path": str(latest_summary_path),
+                "latest_summary_report_path": str(latest_report_path),
+                "latest_summary_csv_path": str(latest_csv_path),
+                "latest_summary_json_path": str(latest_json_path),
+                "finished_at": _now_iso8601(),
+            }
+        )
+        self._write_manifest()
+        write_json(
+            self.latest_collect_manifest_path(),
+            {
+                "run_label": self.run_label,
+                "archive_dir": str(self.run_dir),
+                "manifest_path": str(self.manifest_path),
+                "summary_npz_path": str(latest_summary_path),
+                "report_path": str(latest_report_path),
+                "csv_path": str(latest_csv_path),
+                "json_path": str(latest_json_path),
+                "timestamp": timestamp,
+            },
+        )
+
+        log_info(f"汇总结果已保存: {summary_path}")
+        log_info(f"可读 Markdown 报告: {report_path}")
+        log_info(f"可读 CSV 汇总: {csv_path}")
         return ResultPaths(
-            npz_path=self.config.summary_path,
+            npz_path=summary_path,
             json_path=json_path,
             report_path=report_path,
+            csv_path=csv_path,
+            manifest_path=self.manifest_path,
+            archive_dir=self.run_dir,
         )
 
     def load_summary(self, path: Path | None = None) -> IdentificationResults:
@@ -336,6 +522,496 @@ class ResultsManager:
             batch_sample_count=batch_sample_count,
         )
 
+    def compare_archived_runs(
+        self,
+        *,
+        limit: int = 5,
+        compare_all: bool = False,
+    ) -> ResultPaths:
+        archived_runs = self.list_archived_runs(mode="collect")
+        if not archived_runs:
+            raise FileNotFoundError(f"在 {self.archive_root} 和 {self.results_dir} 中都没有找到可比较的辨识结果。")
+
+        ordered_runs = sorted(archived_runs, key=lambda item: (item.timestamp, item.run_label))
+        selected_runs = ordered_runs if compare_all else ordered_runs[-max(int(limit), 1) :]
+        stamp = _filesystem_timestamp()
+        report_path = self.comparison_root / f"identification_compare_{stamp}.md"
+        csv_path = self.comparison_root / f"identification_compare_{stamp}.csv"
+
+        self._write_comparison_csv(csv_path, selected_runs)
+        self._write_comparison_report(report_path, selected_runs)
+
+        latest_report_path = self._mirror_file(report_path, self.comparison_root / "identification_compare_latest.md")
+        latest_csv_path = self._mirror_file(csv_path, self.comparison_root / "identification_compare_latest.csv")
+        manifest_path = write_json(
+            self.latest_comparison_manifest_path(),
+            {
+                "generated_at": _now_iso8601(),
+                "report_path": str(latest_report_path),
+                "csv_path": str(latest_csv_path),
+                "selected_run_labels": [item.run_label for item in selected_runs],
+                "selected_archive_dirs": [str(item.archive_dir) for item in selected_runs],
+            },
+        )
+
+        log_info(f"跨运行对比报告已生成: {report_path}")
+        log_info(f"跨运行对比 CSV 已生成: {csv_path}")
+        return ResultPaths(
+            report_path=report_path,
+            csv_path=csv_path,
+            manifest_path=manifest_path,
+            archive_dir=self.comparison_root,
+        )
+
+    def list_archived_runs(self, *, mode: str | None = None) -> list[ArchivedRunSummary]:
+        runs: list[ArchivedRunSummary] = []
+        for manifest_path in sorted(self.archive_root.glob(f"*/{RUN_MANIFEST_FILENAME}")):
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            run_mode = str(payload.get("mode", ""))
+            if mode is not None and run_mode != mode:
+                continue
+            summary_path_raw = payload.get("summary_npz_path")
+            if not summary_path_raw:
+                continue
+            summary_path = Path(summary_path_raw)
+            if not summary_path.exists():
+                continue
+            try:
+                summary = self.load_summary(summary_path)
+            except Exception:
+                continue
+            runs.append(
+                ArchivedRunSummary(
+                    run_label=str(payload.get("run_label", manifest_path.parent.name)),
+                    mode=run_mode or "collect",
+                    timestamp=str(summary.timestamp or payload.get("started_at", "")),
+                    batch_count=int(summary.batch_count),
+                    archive_dir=manifest_path.parent,
+                    summary_path=summary_path,
+                    report_path=Path(payload["summary_report_path"]) if payload.get("summary_report_path") else None,
+                    csv_path=Path(payload["summary_csv_path"]) if payload.get("summary_csv_path") else None,
+                    manifest_path=manifest_path,
+                    summary=summary,
+                )
+            )
+
+        if runs:
+            return runs
+
+        if mode in {None, "collect"} and self.config.summary_path.exists():
+            summary = self.load_summary(self.config.summary_path)
+            runs.append(
+                ArchivedRunSummary(
+                    run_label="latest_root",
+                    mode="collect",
+                    timestamp=str(summary.timestamp),
+                    batch_count=int(summary.batch_count),
+                    archive_dir=self.results_dir,
+                    summary_path=self.config.summary_path,
+                    report_path=self.config.report_path if self.config.report_path.exists() else None,
+                    csv_path=self.latest_summary_csv_path() if self.latest_summary_csv_path().exists() else None,
+                    manifest_path=self.latest_collect_manifest_path(),
+                    summary=summary,
+                )
+            )
+        return runs
+
+    def _require_run_dir(self) -> Path:
+        if self.run_dir is None:
+            raise RuntimeError("Result archive has not been initialized. Call begin_run() first.")
+        return self.run_dir
+
+    def _write_manifest(self) -> None:
+        if self.manifest_path is None:
+            return
+        write_json(self.manifest_path, self._manifest)
+
+    def _mirror_file(self, source: Path | None, destination: Path | None) -> Path | None:
+        if source is None or destination is None:
+            return None
+        source = Path(source)
+        destination = Path(destination)
+        if not source.exists():
+            return None
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        return destination
+
+    def _archive_existing_latest_collect_if_needed(self) -> None:
+        if self.latest_collect_manifest_path().exists():
+            try:
+                payload = json.loads(self.latest_collect_manifest_path().read_text(encoding="utf-8"))
+                archive_dir = Path(payload.get("archive_dir", ""))
+                if archive_dir.exists():
+                    return
+            except Exception:
+                pass
+
+        summary_path = self.config.summary_path
+        if not summary_path.exists():
+            return
+
+        import_label = f"{_filesystem_timestamp()}_legacy_collect"
+        import_dir = ensure_directory(self.archive_root / import_label)
+        imported_summary_path = import_dir / self.config.output.hardware_summary_filename
+        imported_report_path = import_dir / self.config.output.hardware_report_filename
+        imported_csv_path = import_dir / _summary_csv_filename(self.config)
+        imported_json_path = import_dir / self.config.output.legacy_summary_filename
+
+        self._mirror_file(summary_path, imported_summary_path)
+        if self.config.report_path.exists():
+            self._mirror_file(self.config.report_path, imported_report_path)
+        if self.latest_summary_csv_path().exists():
+            self._mirror_file(self.latest_summary_csv_path(), imported_csv_path)
+        if (self.results_dir / self.config.output.legacy_summary_filename).exists():
+            self._mirror_file(self.results_dir / self.config.output.legacy_summary_filename, imported_json_path)
+
+        manifest_path = import_dir / RUN_MANIFEST_FILENAME
+        write_json(
+            manifest_path,
+            {
+                "run_label": import_label,
+                "mode": "collect",
+                "started_at": _now_iso8601(),
+                "archive_dir": str(import_dir),
+                "config_path": str(self.config.config_path),
+                "imported_from_latest_root": True,
+                "summary_npz_path": str(imported_summary_path),
+                "summary_report_path": str(imported_report_path) if imported_report_path.exists() else None,
+                "summary_csv_path": str(imported_csv_path) if imported_csv_path.exists() else None,
+                "summary_json_path": str(imported_json_path) if imported_json_path.exists() else None,
+            },
+        )
+        write_json(
+            self.latest_collect_manifest_path(),
+            {
+                "run_label": import_label,
+                "archive_dir": str(import_dir),
+                "manifest_path": str(manifest_path),
+                "summary_npz_path": str(summary_path),
+                "report_path": str(self.config.report_path) if self.config.report_path.exists() else None,
+                "csv_path": str(self.latest_summary_csv_path()) if self.latest_summary_csv_path().exists() else None,
+                "json_path": str(self.results_dir / self.config.output.legacy_summary_filename)
+                if (self.results_dir / self.config.output.legacy_summary_filename).exists()
+                else None,
+            },
+        )
+        log_info(f"已将现有最新辨识结果归档为历史运行: {import_dir}")
+
+    def _build_joint_rows(
+        self,
+        *,
+        coulomb: np.ndarray,
+        viscous: np.ndarray,
+        offset: np.ndarray,
+        validation_rmse: np.ndarray,
+        validation_r2: np.ndarray,
+        valid_sample_ratio: np.ndarray,
+        sample_count: np.ndarray,
+        identified_mask: np.ndarray,
+        coulomb_std: np.ndarray,
+        viscous_std: np.ndarray,
+        offset_std: np.ndarray,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for joint_idx, joint_name in enumerate(self.config.robot.joint_names):
+            rows.append(
+                {
+                    "joint_index": int(joint_idx),
+                    "joint_name": str(joint_name),
+                    "identified": bool(identified_mask[joint_idx]),
+                    "coulomb": float(coulomb[joint_idx]),
+                    "viscous": float(viscous[joint_idx]),
+                    "offset": float(offset[joint_idx]),
+                    "validation_rmse": float(validation_rmse[joint_idx]),
+                    "validation_r2": float(validation_r2[joint_idx]),
+                    "valid_sample_ratio": float(valid_sample_ratio[joint_idx]),
+                    "sample_count": int(sample_count[joint_idx]),
+                    "coulomb_std": float(coulomb_std[joint_idx]),
+                    "viscous_std": float(viscous_std[joint_idx]),
+                    "offset_std": float(offset_std[joint_idx]),
+                }
+            )
+        return rows
+
+    def _build_summary_json(
+        self,
+        *,
+        timestamp: str,
+        batch_count: int,
+        joint_rows: list[dict[str, Any]],
+        summary_path: Path,
+        report_path: Path,
+        csv_path: Path,
+        batch_coulomb: np.ndarray,
+        batch_viscous: np.ndarray,
+        batch_offset: np.ndarray,
+        batch_validation_rmse: np.ndarray,
+        batch_validation_r2: np.ndarray,
+        batch_valid_ratio: np.ndarray,
+    ) -> dict[str, Any]:
+        active_rows = [row for row in joint_rows if row["identified"]]
+        best_r2_joint = max(active_rows, key=lambda item: item["validation_r2"], default=None)
+        worst_rmse_joint = max(active_rows, key=lambda item: item["validation_rmse"], default=None)
+        lowest_valid_joint = min(active_rows, key=lambda item: item["valid_sample_ratio"], default=None)
+        return {
+            "run_label": self.run_label,
+            "mode": self.run_mode,
+            "timestamp": timestamp,
+            "batch_count": int(batch_count),
+            "config_path": str(self.config.config_path),
+            "archive_dir": str(self.run_dir),
+            "summary_npz_path": str(summary_path),
+            "report_path": str(report_path),
+            "csv_path": str(csv_path),
+            "joint_names": list(self.config.robot.joint_names),
+            "active_joints": list(self.config.identification.active_joints),
+            "estimated_coulomb": [row["coulomb"] for row in joint_rows],
+            "estimated_viscous": [row["viscous"] for row in joint_rows],
+            "estimated_offset": [row["offset"] for row in joint_rows],
+            "validation_rmse": [row["validation_rmse"] for row in joint_rows],
+            "validation_r2": [row["validation_r2"] for row in joint_rows],
+            "valid_sample_ratio": [row["valid_sample_ratio"] for row in joint_rows],
+            "coulomb_consistency_std": [row["coulomb_std"] for row in joint_rows],
+            "viscous_consistency_std": [row["viscous_std"] for row in joint_rows],
+            "offset_consistency_std": [row["offset_std"] for row in joint_rows],
+            "joint_results": joint_rows,
+            "run_highlights": {
+                "mean_validation_rmse": _mean_of_finite(row["validation_rmse"] for row in active_rows),
+                "mean_validation_r2": _mean_of_finite(row["validation_r2"] for row in active_rows),
+                "mean_valid_sample_ratio": _mean_of_finite(row["valid_sample_ratio"] for row in active_rows),
+                "best_r2_joint": best_r2_joint,
+                "worst_rmse_joint": worst_rmse_joint,
+                "lowest_valid_ratio_joint": lowest_valid_joint,
+            },
+            "batch_metrics": {
+                "batch_coulomb": _normalize_json_value(batch_coulomb),
+                "batch_viscous": _normalize_json_value(batch_viscous),
+                "batch_offset": _normalize_json_value(batch_offset),
+                "batch_validation_rmse": _normalize_json_value(batch_validation_rmse),
+                "batch_validation_r2": _normalize_json_value(batch_validation_r2),
+                "batch_valid_sample_ratio": _normalize_json_value(batch_valid_ratio),
+            },
+        }
+
+    def _write_summary_csv(self, path: Path, joint_rows: list[dict[str, Any]]) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "joint_index",
+                    "joint_name",
+                    "identified",
+                    "coulomb",
+                    "viscous",
+                    "offset",
+                    "validation_rmse",
+                    "validation_r2",
+                    "valid_sample_ratio",
+                    "sample_count",
+                    "coulomb_std",
+                    "viscous_std",
+                    "offset_std",
+                ],
+            )
+            writer.writeheader()
+            for row in joint_rows:
+                writer.writerow(row)
+        return path
+
+    def _write_summary_report(
+        self,
+        *,
+        timestamp: str,
+        batch_count: int,
+        summary_path: Path,
+        json_path: Path,
+        csv_path: Path,
+        joint_rows: list[dict[str, Any]],
+    ) -> Path:
+        active_rows = [row for row in joint_rows if row["identified"]]
+        best_r2_joint = max(active_rows, key=lambda item: item["validation_r2"], default=None)
+        worst_rmse_joint = max(active_rows, key=lambda item: item["validation_rmse"], default=None)
+        lowest_valid_joint = min(active_rows, key=lambda item: item["valid_sample_ratio"], default=None)
+        lines = [
+            "# Hardware Parallel Friction Identification Report",
+            "",
+            "## Run Overview",
+            "",
+            f"- Run Label: `{self.run_label}`",
+            f"- Mode: `{self.run_mode}`",
+            f"- Timestamp: `{timestamp}`",
+            f"- Batches: `{batch_count}`",
+            f"- Active Joints: `{list(self.config.identification.active_joints)}`",
+            f"- Archive Dir: `{self.run_dir}`",
+            "",
+            "## Quick Read",
+            "",
+            f"- Mean Validation RMSE: `{_mean_of_finite(row['validation_rmse'] for row in active_rows):.6f}`",
+            f"- Mean Validation R2: `{_mean_of_finite(row['validation_r2'] for row in active_rows):.4f}`",
+            f"- Mean Valid Sample Ratio: `{_mean_of_finite(row['valid_sample_ratio'] for row in active_rows):.4f}`",
+            f"- Best R2 Joint: `{best_r2_joint['joint_name']}` ({best_r2_joint['validation_r2']:.4f})"
+            if best_r2_joint is not None
+            else "- Best R2 Joint: `N/A`",
+            f"- Worst RMSE Joint: `{worst_rmse_joint['joint_name']}` ({worst_rmse_joint['validation_rmse']:.6f})"
+            if worst_rmse_joint is not None
+            else "- Worst RMSE Joint: `N/A`",
+            f"- Lowest Valid Ratio Joint: `{lowest_valid_joint['joint_name']}` ({lowest_valid_joint['valid_sample_ratio']:.4f})"
+            if lowest_valid_joint is not None
+            else "- Lowest Valid Ratio Joint: `N/A`",
+            "",
+            "## Files",
+            "",
+            f"- Summary NPZ: `{summary_path}`",
+            f"- Readable JSON: `{json_path}`",
+            f"- Readable CSV: `{csv_path}`",
+            f"- Latest Root Summary: `{self.config.summary_path}`",
+            f"- Compare Command: `./run.sh compare`",
+            "",
+            "## Joint Table",
+            "",
+            "| Joint | Identified | Coulomb | Viscous | Offset | Val RMSE | Val R2 | Valid Ratio | Sample Count | Coulomb Std | Viscous Std | Offset Std |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for row in joint_rows:
+            lines.append(
+                f"| {row['joint_name']} | {row['identified']} | {row['coulomb']:.6f} | {row['viscous']:.6f} | "
+                f"{row['offset']:.6f} | {row['validation_rmse']:.6f} | {row['validation_r2']:.4f} | "
+                f"{row['valid_sample_ratio']:.4f} | {row['sample_count']} | {row['coulomb_std']:.6f} | "
+                f"{row['viscous_std']:.6f} | {row['offset_std']:.6f} |"
+            )
+        report_path = self.active_report_path()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+        return report_path
+
+    def _write_comparison_csv(self, path: Path, runs: list[ArchivedRunSummary]) -> Path:
+        metric_names = [
+            "coulomb",
+            "viscous",
+            "offset",
+            "validation_rmse",
+            "validation_r2",
+            "valid_sample_ratio",
+            "sample_count",
+        ]
+        fieldnames = [
+            "run_label",
+            "timestamp",
+            "batch_count",
+            "archive_dir",
+            "summary_path",
+            "report_path",
+            "csv_path",
+        ]
+        for joint_idx, joint_name in enumerate(self.config.robot.joint_names, start=1):
+            for metric in metric_names:
+                fieldnames.append(f"J{joint_idx}_{metric}")
+                fieldnames.append(f"{joint_name}_{metric}")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for run in runs:
+                row = {
+                    "run_label": run.run_label,
+                    "timestamp": run.timestamp,
+                    "batch_count": run.batch_count,
+                    "archive_dir": str(run.archive_dir),
+                    "summary_path": str(run.summary_path),
+                    "report_path": str(run.report_path) if run.report_path is not None else "",
+                    "csv_path": str(run.csv_path) if run.csv_path is not None else "",
+                }
+                for joint_result in run.summary.joint_results:
+                    joint_key = f"J{joint_result.joint_index + 1}"
+                    joint_name_key = joint_result.joint_name
+                    metric_values = {
+                        "coulomb": joint_result.coulomb,
+                        "viscous": joint_result.viscous,
+                        "offset": joint_result.offset,
+                        "validation_rmse": joint_result.validation_rmse,
+                        "validation_r2": joint_result.validation_r2,
+                        "valid_sample_ratio": joint_result.valid_sample_ratio,
+                        "sample_count": joint_result.sample_count,
+                    }
+                    for metric_name, value in metric_values.items():
+                        row[f"{joint_key}_{metric_name}"] = value
+                        row[f"{joint_name_key}_{metric_name}"] = value
+                writer.writerow(row)
+        return path
+
+    def _write_comparison_report(self, path: Path, runs: list[ArchivedRunSummary]) -> Path:
+        lines = [
+            "# Hardware Identification Cross-Run Comparison",
+            "",
+            f"- Generated At: `{_now_iso8601()}`",
+            f"- Compared Runs: `{len(runs)}`",
+            f"- Results Root: `{self.results_dir}`",
+            "",
+            "## Compared Runs",
+            "",
+            "| Run | Timestamp | Batches | Archive Dir | Summary | Report |",
+            "|---|---|---:|---|---|---|",
+        ]
+        for run in runs:
+            lines.append(
+                f"| {run.run_label} | {run.timestamp} | {run.batch_count} | `{run.archive_dir}` | "
+                f"`{run.summary_path.name}` | `{run.report_path.name if run.report_path is not None else ''}` |"
+            )
+
+        if len(runs) >= 2:
+            latest = runs[-1]
+            previous = runs[-2]
+            lines.extend(
+                [
+                    "",
+                    f"## Latest vs Previous",
+                    "",
+                    f"- Latest: `{latest.run_label}`",
+                    f"- Previous: `{previous.run_label}`",
+                    "",
+                    "| Joint | Delta Coulomb | Delta Viscous | Delta Offset | Delta RMSE | Delta R2 | Delta Valid Ratio |",
+                    "|---|---:|---:|---:|---:|---:|---:|",
+                ]
+            )
+            for latest_joint, previous_joint in zip(latest.summary.joint_results, previous.summary.joint_results):
+                lines.append(
+                    f"| {latest_joint.joint_name} | "
+                    f"{latest_joint.coulomb - previous_joint.coulomb:+.6f} | "
+                    f"{latest_joint.viscous - previous_joint.viscous:+.6f} | "
+                    f"{latest_joint.offset - previous_joint.offset:+.6f} | "
+                    f"{latest_joint.validation_rmse - previous_joint.validation_rmse:+.6f} | "
+                    f"{latest_joint.validation_r2 - previous_joint.validation_r2:+.4f} | "
+                    f"{latest_joint.valid_sample_ratio - previous_joint.valid_sample_ratio:+.4f} |"
+                )
+
+        for joint_idx, joint_name in enumerate(self.config.robot.joint_names):
+            lines.extend(
+                [
+                    "",
+                    f"## J{joint_idx + 1} {joint_name}",
+                    "",
+                    "| Run | Coulomb | Viscous | Offset | Val RMSE | Val R2 | Valid Ratio | Sample Count |",
+                    "|---|---:|---:|---:|---:|---:|---:|---:|",
+                ]
+            )
+            for run in runs:
+                joint = run.summary.joint_results[joint_idx]
+                lines.append(
+                    f"| {run.run_label} | {joint.coulomb:.6f} | {joint.viscous:.6f} | {joint.offset:.6f} | "
+                    f"{joint.validation_rmse:.6f} | {joint.validation_r2:.4f} | {joint.valid_sample_ratio:.4f} | "
+                    f"{joint.sample_count} |"
+                )
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return path
+
     def _serialize_collection(
         self,
         data: CollectedData,
@@ -348,6 +1024,7 @@ class ResultsManager:
                 {
                     "source": data.source,
                     "mode": data.mode,
+                    "run_label": self.run_label,
                     "batch_index": batch_index,
                     "total_batches": total_batches,
                     "config_path": str(self.config.config_path),
@@ -425,52 +1102,26 @@ class ResultsManager:
         )
         return payload
 
-    def _write_summary_report(
-        self,
-        *,
-        timestamp: str,
-        batch_count: int,
-        coulomb: np.ndarray,
-        viscous: np.ndarray,
-        offset: np.ndarray,
-        validation_rmse: np.ndarray,
-        validation_r2: np.ndarray,
-        valid_sample_ratio: np.ndarray,
-        coulomb_std: np.ndarray,
-        viscous_std: np.ndarray,
-        offset_std: np.ndarray,
-    ) -> Path:
-        lines = [
-            "# Hardware Parallel Friction Identification Report",
-            "",
-            f"- Timestamp: {timestamp}",
-            f"- Batches: {batch_count}",
-            f"- Active joints: {list(self.config.identification.active_joints)}",
-            "",
-            "| Joint | Coulomb | Viscous | Offset | Val RMSE | Val R2 | Valid Ratio | Coulomb Std | Viscous Std | Offset Std |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
-        ]
-        for joint_idx, joint_name in enumerate(self.config.robot.joint_names):
-            lines.append(
-                f"| {joint_name} | {coulomb[joint_idx]:.6f} | {viscous[joint_idx]:.6f} | "
-                f"{offset[joint_idx]:.6f} | {validation_rmse[joint_idx]:.6f} | {validation_r2[joint_idx]:.4f} | "
-                f"{valid_sample_ratio[joint_idx]:.4f} | {coulomb_std[joint_idx]:.6f} | "
-                f"{viscous_std[joint_idx]:.6f} | {offset_std[joint_idx]:.6f} |"
-            )
-        report_path = self.config.report_path
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text("\n".join(lines), encoding="utf-8")
-        return report_path
+
+def compare_saved_runs(
+    config: Config,
+    *,
+    limit: int = 5,
+    compare_all: bool = False,
+) -> ResultPaths:
+    return ResultsManager(config).compare_archived_runs(limit=limit, compare_all=compare_all)
 
 
 ResultStore = ResultsManager
 
 
 __all__ = [
+    "ArchivedRunSummary",
     "IdentificationResults",
     "JointResult",
     "ResultPaths",
     "ResultsManager",
     "ResultStore",
     "build_validation_mask",
+    "compare_saved_runs",
 ]
