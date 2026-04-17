@@ -35,11 +35,35 @@
 ./run.sh
 ```
 
-默认会读取：
+默认会进入交互式菜单，通过数字选择运行模式，并显示当前配置文件与目标关节。
+
+快捷模式也保留：
+
+```bash
+./run.sh sim
+./run.sh sim-ff
+./run.sh hw
+./run.sh hw-comp
+./run.sh hw-ff
+```
+
+其中 `real` 仍然兼容旧用法，等价于 `./run.sh hw`。
+
+默认配置文件：
 
 ```text
 friction_identification_core/default.yaml
 ```
+
+菜单模式下可直接：
+
+- 输入 `1` 启动仿真采集
+- 输入 `4` 启动真机补偿验证
+- 输入 `j` 临时切换目标关节
+- 输入 `c` 切换配置文件
+- 输入 `r` 重复上次运行
+
+底层统一 CLI 入口仍然可直接使用。
 
 仿真入口：
 
@@ -81,6 +105,8 @@ identification:
 ```bash
 pip3 install -r requirements.txt
 ```
+
+`run.sh` 现在只做按需依赖检查，不会在每次启动时自动执行 `pip install`。
 
 主要依赖：
 

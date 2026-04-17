@@ -43,11 +43,11 @@ identification:
   # 激励轨迹参数
   excitation:
     # 激励时长，单位 s
-    duration: 30.0
+    duration: 45.0
     # 基础频率，单位 Hz
-    base_frequency: 0.12
+    base_frequency: 0.10
     # 激励幅值缩放系数，越大关节运动幅度通常越大
-    amplitude_scale: 0.22
+    amplitude_scale: 0.25
   # 从 home 姿态过渡到激励起点时的限制
   transition:
     # 末端允许的最大速度，单位 m/s
@@ -78,24 +78,24 @@ safety:
 # 采样与仿真步长配置
 sampling:
   # 数据采样频率，单位 Hz
-  rate: 400.0
+  rate: 500.0
   # 仿真/积分步长，单位 s
-  timestep: 0.0005
+  timestep: 0.0004
   # 真机控制周期低于规划频率时，允许参考轨迹每次最多前进多少个规划步长
   hardware_reference_step_factor: 4.0
 
 # 摩擦参数拟合器配置
 fitting:
   # 平滑符号函数的速度尺度，越小越接近 sign(v)
-  velocity_scale: 0.03
+  velocity_scale: 0.025
   # 正则化系数，防止病态拟合
-  regularization: 1.0e-8
+  regularization: 1.0e-6
   # 最大迭代次数
-  max_iterations: 16
+  max_iterations: 20
   # Huber 损失阈值，用于降低异常值影响
-  huber_delta: 1.35
+  huber_delta: 1.5
   # 低于该速度阈值的数据点可认为速度过小，单位 rad/s
-  min_velocity_threshold: 0.01
+  min_velocity_threshold: 0.005
 
 # 串口采集配置
 serial:

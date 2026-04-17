@@ -127,6 +127,44 @@ def _compute_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(1.0 - residual / denom)
 
 
+def _build_candidate_velocity_scales_for_joint(
+    joint_velocity: np.ndarray,
+    *,
+    default_velocity_scale: float,
+    fallback: tuple[float, ...],
+) -> tuple[float, ...]:
+    joint_velocity = np.asarray(joint_velocity, dtype=np.float64).reshape(-1)
+    speed = np.abs(joint_velocity)
+    speed_nonzero = speed[np.isfinite(speed) & (speed > 1e-6)]
+    if speed_nonzero.size <= 10:
+        return fallback
+
+    v_10, v_50, v_90 = np.percentile(speed_nonzero, [10, 50, 90])
+    dynamic_scales = (
+        v_10 * 0.3,
+        v_10 * 0.5,
+        v_10 * 0.8,
+        v_50 * 0.2,
+        v_50 * 0.4,
+        v_90 * 0.1,
+        v_90 * 0.2,
+    )
+    candidates = {
+        float(default_velocity_scale),
+        0.005,
+        0.01,
+        0.02,
+        0.03,
+        0.05,
+        0.08,
+        0.12,
+    }
+    for candidate in dynamic_scales:
+        if np.isfinite(candidate) and candidate > 0.0:
+            candidates.add(float(np.clip(candidate, 0.003, 0.3)))
+    return tuple(sorted(candidates))
+
+
 def fit_joint_friction(
     velocity: np.ndarray,
     torque: np.ndarray,
@@ -267,9 +305,14 @@ def fit_multijoint_friction(
     for joint_idx in range(num_joints):
         if progress_callback is not None:
             progress_callback(joint_idx + 1, num_joints, joint_names[joint_idx])
+        candidate_velocity_scales_joint = _build_candidate_velocity_scales_for_joint(
+            velocity[train_mask, joint_idx],
+            default_velocity_scale=velocity_scale,
+            fallback=candidate_velocity_scales,
+        )
         best_score = None
         params = None
-        for candidate_scale in candidate_velocity_scales:
+        for candidate_scale in candidate_velocity_scales_joint:
             for include_offset in (False, True):
                 candidate_params = fit_joint_friction(
                     velocity[train_mask, joint_idx],

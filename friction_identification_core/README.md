@@ -34,8 +34,12 @@
 ## 运行
 
 ```bash
+./run.sh
+./run.sh sim-ff
+./run.sh hw-comp
 python3 -m friction_identification_core run --source sim
 python3 -m friction_identification_core run --source sim --mode full_feedforward
 python3 -m friction_identification_core run --source hw --mode collect
+python3 -m friction_identification_core run --source hw --mode compensate
 python3 -m friction_identification_core run --source hw --mode full_feedforward
 ```

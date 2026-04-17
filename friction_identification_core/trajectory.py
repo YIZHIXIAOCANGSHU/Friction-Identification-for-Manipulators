@@ -247,12 +247,21 @@ def generate_segmented_excitation_trajectory(
 
         cycles = base_cycles * (1.0 + 0.05 * active_order)
         omega = 2.0 * np.pi * cycles / segment_duration
-        harmonic_ratio = 2.1
-        phase_shift = 0.35 * active_order
-        pattern = envelope * (
+        # Stack harmonics and a chirp so each segment spans a wider speed range.
+        base_pattern = (
             np.sin(omega * local_t)
-            + 0.28 * np.sin(harmonic_ratio * omega * local_t + phase_shift)
+            + 0.30 * np.sin(2.1 * omega * local_t + 0.35)
+            + 0.18 * np.sin(3.5 * omega * local_t + 0.7)
+            + 0.10 * np.sin(5.2 * omega * local_t + 1.1)
         )
+        chirp_freq_start = 0.5 * omega / (2.0 * np.pi)
+        chirp_freq_end = 2.0 * omega / (2.0 * np.pi)
+        chirp_phase = 2.0 * np.pi * (
+            chirp_freq_start * local_t
+            + 0.5 * (chirp_freq_end - chirp_freq_start) * (local_t**2) / segment_duration
+        )
+        chirp_pattern = 0.15 * np.sin(chirp_phase)
+        pattern = envelope * (base_pattern + chirp_pattern)
 
         amplitude = plan.amplitudes[joint_idx]
         if plan.limited[joint_idx]:

@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.signal import savgol_filter
 
 from friction_identification_core.config import Config
 from friction_identification_core.controller import (
@@ -186,6 +187,59 @@ def _build_residual_clean_sample_mask(
         axis=1,
     )
     return finite & within_window & moving & residual_reasonable
+
+
+def _smooth_velocity_and_estimate_acceleration(
+    time_samples: np.ndarray,
+    velocity: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, dict[str, float | int | str]]:
+    time_samples = np.asarray(time_samples, dtype=np.float64).reshape(-1)
+    velocity = np.asarray(velocity, dtype=np.float64)
+    if velocity.ndim != 2 or velocity.shape[0] != time_samples.size:
+        raise ValueError("velocity must have shape [N, J] aligned with time_samples.")
+
+    gradient_order = 2 if time_samples.size >= 3 else 1
+    sample_dt = np.diff(time_samples)
+    positive_dt = sample_dt[sample_dt > 1e-9]
+    if positive_dt.size == 0:
+        qdd = np.gradient(velocity, time_samples, axis=0, edge_order=gradient_order)
+        return velocity.copy(), qdd, {"velocity_filter": "gradient"}
+
+    polyorder = 3 if time_samples.size >= 7 else max(1, time_samples.size - 3)
+    max_window = min(15, time_samples.size if time_samples.size % 2 == 1 else time_samples.size - 1)
+    min_window = max(5, polyorder + 2)
+    if min_window % 2 == 0:
+        min_window += 1
+    window_length = max_window
+
+    if window_length < min_window:
+        qdd = np.gradient(velocity, time_samples, axis=0, edge_order=gradient_order)
+        return velocity.copy(), qdd, {"velocity_filter": "gradient"}
+
+    delta = float(np.mean(positive_dt))
+    qd_filtered = savgol_filter(
+        velocity,
+        window_length=window_length,
+        polyorder=polyorder,
+        deriv=0,
+        delta=delta,
+        axis=0,
+        mode="interp",
+    )
+    qdd = savgol_filter(
+        qd_filtered,
+        window_length=window_length,
+        polyorder=polyorder,
+        deriv=1,
+        delta=delta,
+        axis=0,
+        mode="interp",
+    )
+    return qd_filtered, qdd, {
+        "velocity_filter": "savgol",
+        "velocity_filter_window_length": int(window_length),
+        "velocity_filter_polyorder": int(polyorder),
+    }
 
 
 class HardwareSource:
@@ -561,21 +615,23 @@ class HardwareSource:
             log_info("真机样本过少，跳过实际数据辨识。")
             return None
 
-        gradient_order = 2 if data.sample_count >= 3 else 1
-        qdd = np.gradient(data.qd, data.time, axis=0, edge_order=gradient_order)
+        qd_filtered, qdd, filter_metadata = _smooth_velocity_and_estimate_acceleration(
+            data.time,
+            data.qd,
+        )
         dynamics = RigidBodyDynamics(
             model_path=str(self.config.robot.urdf_path),
             joint_names=list(self.config.robot.joint_names),
             tcp_offset=self.config.robot.tcp_offset,
         )
-        tau_rigid = dynamics.batch_inverse_dynamics(data.q, data.qd, qdd)
+        tau_rigid = dynamics.batch_inverse_dynamics(data.q, qd_filtered, qdd)
         tau_friction = data.tau_measured - tau_rigid
 
         safety = SafetyGuard(self.config, active_joint_mask=self.config.target_joint_mask)
         lower, upper = safety.safe_joint_window()
         clean_mask = _build_residual_clean_sample_mask(
             q=data.q,
-            qd=data.qd,
+            qd=qd_filtered,
             tau_residual=tau_friction,
             lower=lower,
             upper=upper,
@@ -592,15 +648,16 @@ class HardwareSource:
         data.tau_rigid = tau_rigid
         data.tau_friction = tau_friction
         data.clean_mask = clean_mask
+        data.metadata.update(filter_metadata)
 
-        qd_clean = data.qd[clean_mask]
+        qd_clean = qd_filtered[clean_mask]
         tau_clean = tau_friction[clean_mask]
         return IdentificationInputs(
             velocity=qd_clean[:, self.config.target_joint_mask],
             torque=tau_clean[:, self.config.target_joint_mask],
             joint_names=[self.config.target_joint_name],
             clean_mask=clean_mask,
-            metadata={"retained_samples": retained},
+            metadata={**filter_metadata, "retained_samples": retained},
         )
 
     def finalize(
