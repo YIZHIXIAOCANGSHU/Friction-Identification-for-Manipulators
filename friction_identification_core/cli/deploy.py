@@ -17,9 +17,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("collect", "compensate"),
+        choices=("collect", "compensate", "full_feedforward"),
         default="collect",
-        help="Hardware execution mode.",
+        help="Hardware execution mode: collect, compensate, or full_feedforward (g+c+friction).",
     )
     return parser
 

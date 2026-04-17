@@ -39,7 +39,7 @@ simulation_friction:
 # 摩擦辨识任务本身的配置
 identification:
   # 目标辨识关节的索引，从 0 开始
-  target_joint: 2
+  target_joint: 4
   # 激励轨迹参数
   excitation:
     # 激励时长，单位 s

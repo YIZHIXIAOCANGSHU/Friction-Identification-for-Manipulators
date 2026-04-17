@@ -25,16 +25,19 @@ class SafetyGuard:
         upper = self.joint_limits[:, 1] - self.margin
         return lower, upper
 
-    def check_joint_limits(self, q: np.ndarray) -> bool:
-        lower, upper = self.safe_joint_window()
+    def hard_joint_window(self) -> tuple[np.ndarray, np.ndarray]:
+        return self.joint_limits[:, 0].copy(), self.joint_limits[:, 1].copy()
+
+    def check_joint_limits(self, q: np.ndarray, *, use_safe_margin: bool = False) -> bool:
+        lower, upper = self.safe_joint_window() if use_safe_margin else self.hard_joint_window()
         q = np.asarray(q, dtype=np.float64).reshape(-1)
         within = (q >= lower) & (q <= upper)
         within[~self.active_joint_mask] = True
         return bool(np.all(within))
 
-    def get_violation_message(self, q: np.ndarray) -> str | None:
+    def get_violation_message(self, q: np.ndarray, *, use_safe_margin: bool = False) -> str | None:
         q = np.asarray(q, dtype=np.float64).reshape(-1)
-        lower, upper = self.safe_joint_window()
+        lower, upper = self.safe_joint_window() if use_safe_margin else self.hard_joint_window()
         violation = np.flatnonzero(
             (q < lower) | (q > upper)
         )
@@ -42,14 +45,15 @@ class SafetyGuard:
         if violation.size == 0:
             return None
         joint_idx = int(violation[0])
+        range_label = "安全关节范围" if use_safe_margin else "物理关节范围"
         return (
-            f"{self.joint_names[joint_idx]} 超出安全关节范围: "
+            f"{self.joint_names[joint_idx]} 超出{range_label}: "
             f"q={q[joint_idx]:.6f} rad, "
-            f"safe_range=[{lower[joint_idx]:.6f}, {upper[joint_idx]:.6f}]"
+            f"range=[{lower[joint_idx]:.6f}, {upper[joint_idx]:.6f}]"
         )
 
-    def assert_joint_limits(self, q: np.ndarray) -> None:
-        message = self.get_violation_message(q)
+    def assert_joint_limits(self, q: np.ndarray, *, use_safe_margin: bool = False) -> None:
+        message = self.get_violation_message(q, use_safe_margin=use_safe_margin)
         if message is not None:
             raise RuntimeError(message)
 

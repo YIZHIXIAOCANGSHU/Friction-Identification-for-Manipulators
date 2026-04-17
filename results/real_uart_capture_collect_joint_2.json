@@ -1,0 +1,12 @@
+{
+  "mode": "collect",
+  "config_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/friction_identification_core/config/default.yaml",
+  "target_joint": 1,
+  "target_joint_name": "ArmLthird_Joint",
+  "sample_count": 10225,
+  "duration_s": 32.673180959012825,
+  "termination_reason": "collection_complete",
+  "mean_uart_cycle_hz": 338.51388595658375,
+  "mean_uart_latency_ms": 3.1954211206858507,
+  "mean_uart_transfer_kbps": 525.373551004618
+}

@@ -409,8 +409,8 @@ def _identify_from_capture(
 
 
 def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
-    if mode not in {"collect", "compensate"}:
-        raise ValueError("mode must be 'collect' or 'compensate'.")
+    if mode not in {"collect", "compensate", "full_feedforward"}:
+        raise ValueError("mode must be 'collect', 'compensate', or 'full_feedforward'.")
 
     try:
         import serial
@@ -422,11 +422,11 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
     controller = FrictionIdentificationController(config, env, safety=safety)
     reporter = build_hardware_reporter(config)
     pose_estimator = build_pose_estimator(config)
-    parameters = _load_compensation_parameters(config.summary_path, config.joint_count) if mode == "compensate" else None
+    parameters = _load_compensation_parameters(config.summary_path, config.joint_count) if mode in ("compensate", "full_feedforward") else None
 
     reference_state = None
     reference_max_step_s = None
-    if mode == "collect":
+    if mode in ("collect", "full_feedforward"):
         excitation_reference = env.build_excitation_reference()
         startup_target = build_startup_pose(config, excitation_reference)
         reference_state = LiveReferenceState(
@@ -446,8 +446,8 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
     tau_measured = np.zeros(config.joint_count, dtype=np.float64)
     mos_temp = np.zeros(config.joint_count, dtype=np.float64)
     coil_temp = np.zeros(config.joint_count, dtype=np.float64)
-    complete_feedback_mask = (1 << config.joint_count) - 1
-    feedback_mask = 0
+    target_joint_idx = int(config.target_joint)
+    last_feedback_time = np.full(config.joint_count, np.nan, dtype=np.float64)
 
     time_log: list[float] = []
     q_log: list[np.ndarray] = []
@@ -472,6 +472,8 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
     termination_reason = "completed"
     bytes_per_cycle = RECV_FRAME_SIZE * config.joint_count + SEND_FRAME_SIZE
     command_refresh_period_s = 1.0 / max(float(config.sampling.rate), 1.0)
+    nominal_feedback_cycle_s = max((bytes_per_cycle * 10.0) / max(float(config.serial.baudrate), 1.0), command_refresh_period_s)
+    feedback_stale_timeout_s = max(nominal_feedback_cycle_s * 3.0, 0.1)
     last_command_frame = zero_frame
     last_command_send_time = None
     last_feedback_wait_log_time = None
@@ -509,23 +511,29 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
                     continue
 
                 idx = frame.motor_id - 1
+                frame_time = time.perf_counter()
                 q[idx] = frame.position
                 qd[idx] = frame.velocity
                 tau_measured[idx] = frame.torque
                 mos_temp[idx] = frame.mos_temperature
                 coil_temp[idx] = frame.coil_temperature
-                feedback_mask |= 1 << idx
+                last_feedback_time[idx] = frame_time
+            now = time.perf_counter()
+            target_feedback_available = np.isfinite(last_feedback_time[target_joint_idx])
+            target_feedback_fresh = target_feedback_available and (
+                now - float(last_feedback_time[target_joint_idx])
+            ) < feedback_stale_timeout_s
 
-                if feedback_mask != complete_feedback_mask:
-                    continue
-
-                cycle_end = time.perf_counter()
+            if target_feedback_fresh and (
+                last_cycle_end is None
+                or (now - last_cycle_end) >= command_refresh_period_s
+            ):
+                cycle_end = now
                 if start_time is None:
                     start_time = cycle_end
                 elapsed_s = cycle_end - start_time
                 cycle_period = (cycle_end - last_cycle_end) if last_cycle_end is not None else 0.0
                 last_cycle_end = cycle_end
-                feedback_mask = 0
 
                 safety.assert_joint_limits(q)
 
@@ -543,6 +551,37 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
                         q_curr=q,
                         qd_curr=qd,
                     )
+                elif mode == "full_feedforward":
+                    # 完整前馈模式: tau_ff(刚体动力学前馈) + 摩擦力补偿 + 反馈
+                    assert reference_state is not None
+                    assert parameters is not None
+                    reference_state.initialize(env, q, startup_target, elapsed_s)
+                    q_cmd_ref, qd_cmd_ref, qdd_cmd_ref = reference_state.sample(
+                        elapsed_s,
+                        max_step_s=reference_max_step_s,
+                    )
+                    # 计算刚体动力学前馈和反馈项
+                    tau_ff, tau_fb, _ = controller.compute_torque(
+                        q_cmd=q_cmd_ref,
+                        qd_cmd=qd_cmd_ref,
+                        qdd_cmd=qdd_cmd_ref,
+                        q_curr=q,
+                        qd_curr=qd,
+                    )
+                    # 计算摩擦力补偿 (使用期望速度 qd_cmd_ref)
+                    tau_friction = _predict_compensation_torque(
+                        qd_cmd_ref,
+                        parameters,
+                        torque_limits=config.robot.torque_limits,
+                    )
+                    # 完整前馈 = 刚体动力学前馈 + 摩擦力补偿
+                    tau_ff_total = tau_ff + tau_friction
+                    # 完整控制力矩 = 完整前馈 + 反馈
+                    tau_command = safety.soften_torque_near_joint_limits(
+                        q,
+                        safety.clamp_torque(tau_ff_total + controller.feedback_scale * tau_fb),
+                    )
+                    tau_ff = tau_ff_total  # 记录完整前馈
                 else:
                     assert parameters is not None
                     q_cmd_ref = q.copy()
@@ -613,7 +652,7 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
                         tx_text=None,
                     )
 
-                if mode == "collect" and reference_state.is_complete():
+                if mode in ("collect", "full_feedforward") and reference_state.is_complete():
                     termination_reason = "collection_complete"
                     raise KeyboardInterrupt
 
@@ -623,24 +662,25 @@ def run_hardware(config: Config, *, mode: str) -> tuple[Path, Path]:
                     last_command_send_time is None
                     or (now - last_command_send_time) >= command_refresh_period_s
                 ):
+                    if not target_feedback_fresh:
+                        last_command_frame = zero_frame
                     ser.write(last_command_frame)
                     last_command_send_time = now
 
-                if feedback_mask != complete_feedback_mask:
-                    missing_motor_ids = [
-                        str(motor_id)
-                        for motor_id in range(1, config.joint_count + 1)
-                        if (feedback_mask & (1 << (motor_id - 1))) == 0
-                    ]
-                    if (
-                        last_feedback_wait_log_time is None
-                        or (now - last_feedback_wait_log_time) >= 1.0
-                    ):
-                        log_info(
-                            "等待完整电机反馈，"
-                            f"当前缺少电机: {', '.join(missing_motor_ids)}"
-                        )
-                        last_feedback_wait_log_time = now
+                if not target_feedback_fresh and (
+                    last_feedback_wait_log_time is None
+                    or (now - last_feedback_wait_log_time) >= 1.0
+                ):
+                    if target_feedback_available:
+                        last_seen_ms = (now - float(last_feedback_time[target_joint_idx])) * 1000.0
+                        detail = f"最近一次收到 J{target_joint_idx + 1} 反馈已过去 {last_seen_ms:.0f} ms"
+                    else:
+                        detail = f"尚未收到 J{target_joint_idx + 1} 反馈"
+                    log_info(
+                        "等待目标关节反馈，"
+                        f"{detail}，继续发送零力矩保持安全。"
+                    )
+                    last_feedback_wait_log_time = now
 
             if not emitted_sample or bytes_waiting <= 0:
                 time.sleep(0.0005)
