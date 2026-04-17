@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-"""Robust least-squares estimators for joint friction identification."""
-
 from typing import Callable, Iterable, Optional
 
 import numpy as np
 from scipy.optimize import lsq_linear
 
-from friction_identification_core.core.models import FrictionIdentificationResult, JointFrictionParameters
+from friction_identification_core.models import FrictionIdentificationResult, JointFrictionParameters
 
 
 def smooth_sign(velocity: np.ndarray, velocity_scale: float) -> np.ndarray:

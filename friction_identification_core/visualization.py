@@ -7,13 +7,13 @@ from typing import Sequence
 import numpy as np
 
 from friction_identification_core.config import Config
-from friction_identification_core.core.models import (
+from friction_identification_core.models import (
     FrictionIdentificationResult,
     FrictionSampleBatch,
     TrackingEvaluationResult,
 )
-from friction_identification_core.utils.logging import log_info
-from friction_identification_core.utils.mujoco import build_am_d02_model
+from friction_identification_core.mujoco_support import build_am_d02_model
+from friction_identification_core.runtime import log_info
 
 
 class SimulationRerunReporter:
@@ -394,3 +394,13 @@ def build_pose_estimator(config: Config):
     except Exception as exc:
         log_info(f"MuJoCo 真机姿态可视化初始化失败，将继续运行: {exc}")
         return None
+
+
+__all__ = [
+    "HardwareRerunReporter",
+    "PoseEstimator",
+    "SimulationRerunReporter",
+    "build_hardware_reporter",
+    "build_pose_estimator",
+    "build_simulation_reporter",
+]

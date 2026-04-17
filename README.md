@@ -1,19 +1,33 @@
 # OpenArm 摩擦力辨识
 
-项目现在按 `plans/refactor_plan.md` 重构为新的分层结构：
+项目现在按 `plans/simplify_architecture_plan.md` 收敛为统一 pipeline 架构，旧的兼容包装层已经移除，只保留一套顶层实现：
 
-- `friction_identification_core/config/`
-  - YAML 配置与加载器
-- `friction_identification_core/core/`
-  - 轨迹、控制器、安全、拟合核心与数据模型
-- `friction_identification_core/simulation/`
-  - MuJoCo 环境与仿真 runner
-- `friction_identification_core/hardware/`
-  - 串口协议与真机 runner
-- `friction_identification_core/cli/`
-  - `simulate.py` / `deploy.py`
-- `friction_identification_core/utils/`
-  - 日志、可视化与 MuJoCo 场景辅助
+- `friction_identification_core/__main__.py`
+  - 统一 CLI 入口
+- `friction_identification_core/config.py`
+  - YAML 配置加载
+- `friction_identification_core/default.yaml`
+  - 默认配置
+- `friction_identification_core/pipeline.py`
+  - 仿真/真机共享的辨识流程
+- `friction_identification_core/sources/`
+  - `simulation.py` / `hardware.py` 数据源实现
+- `friction_identification_core/controller.py`
+  - 控制、安全、补偿
+- `friction_identification_core/trajectory.py`
+  - 轨迹生成
+- `friction_identification_core/estimator.py`
+  - 摩擦参数估计
+- `friction_identification_core/results.py`
+  - 单文件结果管理
+- `friction_identification_core/mujoco_env.py`
+  - MuJoCo 环境封装
+- `friction_identification_core/serial_protocol.py`
+  - 串口协议
+- `friction_identification_core/visualization.py`
+  - 可视化
+- `friction_identification_core/mujoco_support.py`
+  - MuJoCo 模型构建辅助
 
 ## 快速开始
 
@@ -24,20 +38,22 @@
 默认会读取：
 
 ```text
-friction_identification_core/config/default.yaml
+friction_identification_core/default.yaml
 ```
 
 仿真入口：
 
 ```bash
-python3 -m friction_identification_core.cli.simulate --config friction_identification_core/config/default.yaml
+python3 -m friction_identification_core run --source sim --config friction_identification_core/default.yaml
+python3 -m friction_identification_core run --source sim --config friction_identification_core/default.yaml --mode full_feedforward
 ```
 
 真机入口：
 
 ```bash
-python3 -m friction_identification_core.cli.deploy --config friction_identification_core/config/default.yaml --mode collect
-python3 -m friction_identification_core.cli.deploy --config friction_identification_core/config/default.yaml --mode compensate
+python3 -m friction_identification_core run --source hw --config friction_identification_core/default.yaml --mode collect
+python3 -m friction_identification_core run --source hw --config friction_identification_core/default.yaml --mode compensate
+python3 -m friction_identification_core run --source hw --config friction_identification_core/default.yaml --mode full_feedforward
 ```
 
 ## 配置方式
@@ -53,12 +69,12 @@ identification:
 
 ## 输出结果
 
-结果默认写入 `results/`，包括：
+结果默认写入 `results/`，核心文件为：
 
-- `friction_identification_joint_<n>.npz/.json`
-- `real_uart_capture_<mode>_joint_<n>.npz/.json`
-- `real_friction_identification_joint_<n>.npz/.json`
-- `real_friction_identification_summary.json`
+- `simulation_results.npz`
+- `hardware_results.npz`
+
+新的 pipeline 会优先更新这两个聚合结果文件。
 
 ## 依赖
 

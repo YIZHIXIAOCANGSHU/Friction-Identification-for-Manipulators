@@ -18,9 +18,11 @@ Usage:
 
 Examples:
   ./run.sh
-  ./run.sh sim --config friction_identification_core/config/default.yaml
+  ./run.sh sim --config friction_identification_core/default.yaml
+  ./run.sh sim --mode full_feedforward
   ./run.sh real
   ./run.sh real --mode compensate
+  ./run.sh real --mode full_feedforward
 EOF
 }
 
@@ -96,11 +98,11 @@ main() {
     if [ "$mode" = "sim" ]; then
         verify_core
         log_step "Launching friction identification (sim mode)"
-        python3 -m friction_identification_core.cli.simulate "$@"
+        python3 -m friction_identification_core run --source sim "$@"
     elif [ "$mode" = "real" ]; then
         verify_real_dependencies
         log_step "Launching UART real mode"
-        python3 -m friction_identification_core.cli.deploy "$@"
+        python3 -m friction_identification_core run --source hw "$@"
     else
         log_error "Unknown mode: $mode"
     fi

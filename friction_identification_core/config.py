@@ -8,7 +8,7 @@ import numpy as np
 import yaml
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("default.yaml")
 
 
@@ -109,10 +109,12 @@ class VisualizationConfig:
 @dataclass(frozen=True)
 class OutputConfig:
     results_dir: Path
+    simulation_results_filename: str = "simulation_results.npz"
+    hardware_results_filename: str = "hardware_results.npz"
     simulation_prefix: str = "friction_identification"
     hardware_capture_prefix: str = "real_uart_capture"
     hardware_ident_prefix: str = "real_friction_identification"
-    summary_filename: str = "real_friction_identification_summary.json"
+    legacy_summary_filename: str = "real_friction_identification_summary.json"
 
 
 @dataclass(frozen=True)
@@ -153,8 +155,20 @@ class Config:
         return self.output.results_dir
 
     @property
+    def simulation_results_path(self) -> Path:
+        return self.results_dir / self.output.simulation_results_filename
+
+    @property
+    def hardware_results_path(self) -> Path:
+        return self.results_dir / self.output.hardware_results_filename
+
+    @property
     def summary_path(self) -> Path:
-        return self.results_dir / self.output.summary_filename
+        return self.hardware_results_path
+
+    @property
+    def legacy_summary_path(self) -> Path:
+        return self.results_dir / self.output.legacy_summary_filename
 
     def resolve_project_path(self, path: str | Path) -> Path:
         candidate = Path(path)
@@ -254,10 +268,18 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
     output_raw = raw["output"]
     output = OutputConfig(
         results_dir=(PROJECT_ROOT / output_raw["results_dir"]).resolve(),
+        simulation_results_filename=str(
+            output_raw.get("simulation_results_filename", "simulation_results.npz")
+        ),
+        hardware_results_filename=str(
+            output_raw.get("hardware_results_filename", "hardware_results.npz")
+        ),
         simulation_prefix=str(output_raw.get("simulation_prefix", "friction_identification")),
         hardware_capture_prefix=str(output_raw.get("hardware_capture_prefix", "real_uart_capture")),
         hardware_ident_prefix=str(output_raw.get("hardware_ident_prefix", "real_friction_identification")),
-        summary_filename=str(output_raw.get("summary_filename", "real_friction_identification_summary.json")),
+        legacy_summary_filename=str(
+            output_raw.get("legacy_summary_filename", output_raw.get("summary_filename", "real_friction_identification_summary.json"))
+        ),
     )
 
     return Config(
@@ -273,3 +295,22 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         output=output,
         config_path=config_path.resolve(),
     )
+
+__all__ = [
+    "PROJECT_ROOT",
+    "DEFAULT_CONFIG_PATH",
+    "Config",
+    "RobotConfig",
+    "FrictionConfig",
+    "ExcitationConfig",
+    "TransitionConfig",
+    "IdentificationConfig",
+    "ControllerConfig",
+    "SafetyConfig",
+    "SamplingConfig",
+    "FittingConfig",
+    "SerialConfig",
+    "VisualizationConfig",
+    "OutputConfig",
+    "load_config",
+]

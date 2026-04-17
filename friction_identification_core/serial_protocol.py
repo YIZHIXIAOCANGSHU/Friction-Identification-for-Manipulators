@@ -108,3 +108,13 @@ class SerialFrameReader:
                 mos_temperature=float(parsed[6]),
                 coil_temperature=float(parsed[7]),
             )
+
+
+__all__ = [
+    "JointFeedbackFrame",
+    "RECV_FRAME_SIZE",
+    "SEND_FRAME_SIZE",
+    "SerialFrameReader",
+    "TorqueCommandFramePacker",
+    "calculate_xor_checksum",
+]

@@ -121,11 +121,9 @@ visualization:
 output:
   # 输出目录，相对项目根目录
   results_dir: "results"
-  # 仿真结果文件名前缀
-  simulation_prefix: "friction_identification"
-  # 硬件原始采集结果文件名前缀
-  hardware_capture_prefix: "real_uart_capture"
-  # 硬件辨识结果文件名前缀
-  hardware_ident_prefix: "real_friction_identification"
-  # 汇总 JSON 文件名
-  summary_filename: "real_friction_identification_summary.json"
+  # 仿真聚合结果文件
+  simulation_results_filename: "simulation_results.npz"
+  # 真机聚合结果文件
+  hardware_results_filename: "hardware_results.npz"
+  # 兼容旧版脚本时使用的历史汇总文件名
+  legacy_summary_filename: "real_friction_identification_summary.json"

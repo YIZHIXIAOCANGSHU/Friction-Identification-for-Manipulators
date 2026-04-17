@@ -192,3 +192,6 @@ def build_am_d02_model(urdf_path: str | Path, tcp_offset: np.ndarray) -> mujoco.
             enhanced_xml_path.unlink()
         except OSError:
             pass
+
+
+__all__ = ["build_am_d02_model"]

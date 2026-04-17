@@ -2,28 +2,34 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 import mujoco
 import mujoco.viewer
 import numpy as np
 
 from friction_identification_core.config import Config
-from friction_identification_core.core.controller import FrictionIdentificationController
-from friction_identification_core.core.models import FrictionSampleBatch
-from friction_identification_core.core.safety import SafetyGuard
-from friction_identification_core.core.trajectory import (
+from friction_identification_core.controller import FrictionIdentificationController, SafetyGuard
+from friction_identification_core.models import FrictionSampleBatch
+from friction_identification_core.trajectory import (
     ReferenceTrajectory,
     build_excitation_trajectory,
     build_quintic_point_to_point_trajectory,
     resolve_joint_limit_arrays,
 )
-from friction_identification_core.utils.mujoco import build_am_d02_model
+from friction_identification_core.mujoco_support import build_am_d02_model
 
 
 @dataclass(frozen=True)
 class SimulationArtifacts:
     raw_batch: FrictionSampleBatch
     clean_mask: np.ndarray
+
+
+TorqueCommandCallback = Callable[
+    [np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    tuple[np.ndarray, np.ndarray, np.ndarray],
+]
 
 
 def _load_model(model_path: str, tcp_offset: np.ndarray) -> mujoco.MjModel:
@@ -316,15 +322,18 @@ class MujocoEnvironment:
         controller: FrictionIdentificationController,
         safety: SafetyGuard,
         *,
+        torque_callback: TorqueCommandCallback | None = None,
         realtime: bool,
     ) -> None:
+        if torque_callback is None:
+            torque_callback = controller.compute_torque
         sim_time = 0.0
         sample_dt = 1.0 / self.config.sampling.rate
         wall_start = time.time()
         for sample_idx in range(reference.q_cmd.shape[0]):
             q_curr, qd_curr, _ = self._get_joint_state()
             safety.assert_joint_limits(q_curr)
-            _, _, tau = controller.compute_torque(
+            _, _, tau = torque_callback(
                 q_cmd=reference.q_cmd[sample_idx],
                 qd_cmd=reference.qd_cmd[sample_idx],
                 qdd_cmd=reference.qdd_cmd[sample_idx],
@@ -348,8 +357,11 @@ class MujocoEnvironment:
         safety: SafetyGuard,
         *,
         startup_reference: ReferenceTrajectory | None = None,
+        torque_callback: TorqueCommandCallback | None = None,
         realtime: bool = False,
     ) -> FrictionSampleBatch:
+        if torque_callback is None:
+            torque_callback = controller.compute_torque
         num_samples = reference.q_cmd.shape[0]
         ee_pos_cmd, ee_quat_cmd = self.evaluate_end_effector_trajectory(reference.q_cmd)
 
@@ -358,7 +370,13 @@ class MujocoEnvironment:
         self._open_viewer()
 
         if startup_reference is not None:
-            self._run_reference_unlogged(startup_reference, controller, safety, realtime=realtime)
+            self._run_reference_unlogged(
+                startup_reference,
+                controller,
+                safety,
+                torque_callback=torque_callback,
+                realtime=realtime,
+            )
 
         time_log = np.asarray(reference.time, dtype=np.float64).copy()
         q_log = np.zeros_like(reference.q_cmd)
@@ -378,7 +396,7 @@ class MujocoEnvironment:
         for sample_idx in range(num_samples):
             q_curr, qd_curr, _ = self._get_joint_state()
             safety.assert_joint_limits(q_curr)
-            _, _, tau = controller.compute_torque(
+            _, _, tau = torque_callback(
                 q_cmd=reference.q_cmd[sample_idx],
                 qd_cmd=reference.qd_cmd[sample_idx],
                 qdd_cmd=reference.qdd_cmd[sample_idx],
