@@ -1,45 +1,57 @@
 # Friction Identification Core
 
-当前实现已经切到统一 pipeline 架构，仿真和真机共享同一套采集与辨识核心。
+这个目录就是当前真机 7 轴并行摩擦力辨识的核心代码。
 
-## 目录
+如果你已经读过仓库根目录 `README.md`，这里建议只把它当成模块内速查表。
 
-- `default.yaml`
-  - 统一配置模板
+## 模块阅读顺序
+
+1. `default.yaml`
+   - 看默认配置和输出命名
+2. `__main__.py`
+   - 看 CLI 如何进入主流程
+3. `pipeline.py`
+   - 看 collect / compensate 如何组织
+4. `sources/hardware.py`
+   - 看真机采集、闭环控制、在线可视化和辨识输入整理
+5. 按需求补读其他模块
+
+## 文件职责
+
+- `__main__.py`
+  - CLI 入口
 - `config.py`
-  - YAML 配置加载
-- `trajectory.py`
-  - 五次多项式与逐电机激励轨迹
-- `controller.py`
-  - 前馈 + PD 控制器、安全保护、补偿参数加载
-- `estimator.py`
-  - 摩擦参数估计
-- `results.py`
-  - 聚合结果读写
+  - YAML 解析和配置对象
+- `default.yaml`
+  - 默认 7 轴并行配置
 - `pipeline.py`
-  - 统一辨识流程
-- `sources/`
-  - 仿真/真机数据源
-- `mujoco_env.py`
-  - MuJoCo 环境封装
-- `serial_protocol.py`
-  - 串口协议与帧收发
-- `runtime.py`
-  - 输出与结果文件工具
+  - 批次编排与结果保存调度
+- `sources/hardware.py`
+  - 真机串口采集、在线控制、在线 `rerun`
+- `controller.py`
+  - 跟踪控制、摩擦补偿、安全约束
+- `trajectory.py`
+  - 全范围复合激励和启动过渡
 - `visualization.py`
-  - Rerun 可视化与真机姿态显示
-- `mujoco_support.py`
-  - MuJoCo 模型/场景构建辅助
+  - `rerun` 蓝图、主页面、按关节页、小图矩阵
+- `results.py`
+  - 批次结果、summary、Markdown 报告
+- `status.py`
+  - 旋转状态、范围比、安全裕量、文本摘要
+- `mujoco_env.py`
+  - MuJoCo 环境和参考轨迹支持
 
-## 运行
+## 常见修改入口
 
-```bash
-./run.sh
-./run.sh sim-ff
-./run.sh hw-comp
-python3 -m friction_identification_core run --source sim
-python3 -m friction_identification_core run --source sim --mode full_feedforward
-python3 -m friction_identification_core run --source hw --mode collect
-python3 -m friction_identification_core run --source hw --mode compensate
-python3 -m friction_identification_core run --source hw --mode full_feedforward
-```
+- 想改轨迹覆盖、错相、速度计划：`trajectory.py`
+- 想改控制器或补偿力矩：`controller.py`
+- 想改 `rerun` 页面布局或新增监控量：`visualization.py`
+- 想改 summary 结构或报告内容：`results.py`
+- 想改筛样逻辑或真机数据记录：`sources/hardware.py`
+
+## 当前约定
+
+- 只维护真机主链路
+- 默认所有 7 个关节并行激活
+- `collect` 输出批次数据和 summary
+- `compensate` 从 summary 中读取摩擦参数做补偿验证

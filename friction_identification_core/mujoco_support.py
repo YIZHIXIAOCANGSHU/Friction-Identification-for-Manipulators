@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Shared MuJoCo model-building helpers for simulation and hardware tooling."""
+"""Shared MuJoCo model-building helpers for hardware identification tooling."""
 
 import os
 import xml.etree.ElementTree as ET

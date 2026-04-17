@@ -1,4 +1,4 @@
-"""Portable friction-identification core for MuJoCo-driven robots."""
+"""Parallel hardware friction-identification toolkit."""
 
 from friction_identification_core.config import DEFAULT_CONFIG_PATH, Config, load_config
 from friction_identification_core.controller import (
@@ -23,10 +23,10 @@ from friction_identification_core.models import (
     JointFrictionParameters,
 )
 from friction_identification_core.pipeline import (
+    BatchRunArtifact,
     IdentificationPipeline,
     PipelineRunResult,
     run_hardware,
-    run_simulation,
 )
 from friction_identification_core.results import (
     IdentificationResults,
@@ -35,40 +35,54 @@ from friction_identification_core.results import (
     ResultsManager,
     ResultStore,
 )
-from friction_identification_core.sources import HardwareSource, SimulationSource, build_source
-from friction_identification_core.trajectory import ReferenceTrajectory, sample_reference_trajectory
+from friction_identification_core.sources import HardwareSource, build_source
+from friction_identification_core.status import (
+    compute_limit_margin_remaining,
+    compute_range_ratio,
+    compute_rotation_state,
+    format_joint_motion_summary,
+)
+from friction_identification_core.trajectory import (
+    ReferenceSample,
+    ReferenceTrajectory,
+    sample_reference_trajectory,
+)
 
 __all__ = [
+    "BatchRunArtifact",
+    "CollectedData",
     "Config",
     "DEFAULT_CONFIG_PATH",
-    "CollectedData",
     "DataSource",
     "FrictionIdentificationController",
-    "SafetyGuard",
-    "FrictionSampleBatch",
     "FrictionIdentificationResult",
-    "IdentificationResults",
+    "FrictionSampleBatch",
+    "HardwareSource",
     "IdentificationInputs",
     "IdentificationPipeline",
-    "JointResult",
+    "IdentificationResults",
     "JointFrictionParameters",
+    "JointResult",
     "PipelineRunResult",
+    "ReferenceSample",
     "ReferenceTrajectory",
     "ResultPaths",
     "ResultsManager",
     "ResultStore",
-    "HardwareSource",
-    "SimulationSource",
+    "SafetyGuard",
     "build_friction_regression_matrix",
     "build_source",
+    "compute_limit_margin_remaining",
+    "compute_range_ratio",
+    "compute_rotation_state",
     "fit_joint_friction",
     "fit_multijoint_friction",
+    "format_joint_motion_summary",
     "load_compensation_parameters",
     "load_config",
     "load_summary_vectors",
     "predict_compensation_torque",
     "predict_friction_torque",
     "run_hardware",
-    "run_simulation",
     "sample_reference_trajectory",
 ]

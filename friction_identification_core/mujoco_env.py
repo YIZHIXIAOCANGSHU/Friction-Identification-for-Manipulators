@@ -1,35 +1,15 @@
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass
-from typing import Callable
-
 import mujoco
-import mujoco.viewer
 import numpy as np
 
 from friction_identification_core.config import Config
-from friction_identification_core.controller import FrictionIdentificationController, SafetyGuard
-from friction_identification_core.models import FrictionSampleBatch
 from friction_identification_core.trajectory import (
     ReferenceTrajectory,
     build_excitation_trajectory,
     build_quintic_point_to_point_trajectory,
-    resolve_joint_limit_arrays,
 )
 from friction_identification_core.mujoco_support import build_am_d02_model
-
-
-@dataclass(frozen=True)
-class SimulationArtifacts:
-    raw_batch: FrictionSampleBatch
-    clean_mask: np.ndarray
-
-
-TorqueCommandCallback = Callable[
-    [np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
-    tuple[np.ndarray, np.ndarray, np.ndarray],
-]
 
 
 def _load_model(model_path: str, tcp_offset: np.ndarray) -> mujoco.MjModel:
@@ -38,55 +18,12 @@ def _load_model(model_path: str, tcp_offset: np.ndarray) -> mujoco.MjModel:
     return mujoco.MjModel.from_xml_path(model_path)
 
 
-def _build_simulation_clean_sample_mask(
-    *,
-    q: np.ndarray,
-    qd: np.ndarray,
-    tau_constraint: np.ndarray,
-    tau_friction: np.ndarray,
-    lower: np.ndarray,
-    upper: np.ndarray,
-    limited: np.ndarray,
-    limit_margin: float,
-    constraint_tolerance: float,
-    active_joints: np.ndarray,
-    min_motion_speed: float = 0.02,
-) -> np.ndarray:
-    q = np.asarray(q, dtype=np.float64)
-    qd = np.asarray(qd, dtype=np.float64)
-    tau_constraint = np.asarray(tau_constraint, dtype=np.float64)
-    tau_friction = np.asarray(tau_friction, dtype=np.float64)
-    active_joint_mask = np.asarray(active_joints, dtype=bool).reshape(-1)
-
-    active_limited = np.asarray(limited, dtype=bool).reshape(-1) & active_joint_mask
-    if np.any(active_limited):
-        margin_to_limits = np.minimum(q - lower[None, :], upper[None, :] - q)
-        margin_to_limits[:, ~active_limited] = np.inf
-        away_from_limits = np.all(margin_to_limits > float(limit_margin), axis=1)
-    else:
-        away_from_limits = np.ones(q.shape[0], dtype=bool)
-
-    constraint_is_clean = np.all(
-        np.abs(tau_constraint[:, active_joint_mask]) < float(constraint_tolerance),
-        axis=1,
-    )
-    finite = (
-        np.all(np.isfinite(q[:, active_joint_mask]), axis=1)
-        & np.all(np.isfinite(qd[:, active_joint_mask]), axis=1)
-        & np.all(np.isfinite(tau_friction[:, active_joint_mask]), axis=1)
-    )
-    moving = np.any(np.abs(qd[:, active_joint_mask]) > float(min_motion_speed), axis=1)
-    return away_from_limits & constraint_is_clean & finite & moving
-
-
 class MujocoEnvironment:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.model = _load_model(str(config.robot.urdf_path), config.robot.tcp_offset)
         self.inverse_model = _load_model(str(config.robot.urdf_path), config.robot.tcp_offset)
-        self.data = mujoco.MjData(self.model)
         self.inverse_data = mujoco.MjData(self.inverse_model)
-        self.viewer = None
 
         self.model.opt.timestep = float(config.sampling.timestep)
         self.inverse_model.opt.timestep = float(config.sampling.timestep)
@@ -118,8 +55,8 @@ class MujocoEnvironment:
         self._apply_joint_limit_overrides(config.robot.joint_limits)
         self._apply_friction_overrides(
             self.model,
-            config.simulation_friction.coulomb,
-            config.simulation_friction.viscous,
+            np.zeros(config.joint_count, dtype=np.float64),
+            np.zeros(config.joint_count, dtype=np.float64),
         )
         self._apply_friction_overrides(
             self.inverse_model,
@@ -153,35 +90,6 @@ class MujocoEnvironment:
         model.dof_frictionloss[self.dof_addrs] = coulomb
         model.dof_damping[self.dof_addrs] = viscous
 
-    def _open_viewer(self) -> None:
-        if not self.config.visualization.render:
-            return
-        if self.viewer is not None:
-            self.viewer.close()
-            self.viewer = None
-        self.viewer = mujoco.viewer.launch_passive(
-            self.model,
-            self.data,
-            show_left_ui=False,
-            show_right_ui=False,
-        )
-        self.viewer.cam.azimuth = 135
-        self.viewer.cam.elevation = -20
-        self.viewer.cam.distance = 1.8
-        self.viewer.cam.lookat[:] = [0.0, 0.0, 1.1]
-
-    def _step_until(self, target_time: float, *, sim_time: float, wall_start: float, realtime: bool) -> float:
-        while sim_time + 1e-12 < target_time:
-            mujoco.mj_step(self.model, self.data)
-            sim_time += self.model.opt.timestep
-            if self.viewer is not None and self.viewer.is_running():
-                self.viewer.sync()
-            if realtime:
-                elapsed = time.time() - wall_start
-                if sim_time > elapsed:
-                    time.sleep(sim_time - elapsed)
-        return sim_time
-
     def _assign_inverse_state(self, q: np.ndarray, qd: np.ndarray, qdd: np.ndarray) -> None:
         self.inverse_data.qpos[:] = 0.0
         self.inverse_data.qvel[:] = 0.0
@@ -199,19 +107,6 @@ class MujocoEnvironment:
         )
         mujoco.mj_inverse(self.inverse_model, self.inverse_data)
         return self.inverse_data.qfrc_inverse[self.dof_addrs].copy()
-
-    def bias_torque(self, q: np.ndarray, qd: np.ndarray) -> np.ndarray:
-        self._assign_inverse_state(
-            np.asarray(q, dtype=np.float64).reshape(-1),
-            np.asarray(qd, dtype=np.float64).reshape(-1),
-            np.zeros(self.config.joint_count, dtype=np.float64),
-        )
-        mujoco.mj_forward(self.inverse_model, self.inverse_data)
-        return self.inverse_data.qfrc_bias[self.dof_addrs].copy()
-
-    def _get_joint_limits(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        joint_limits = self.config.robot.joint_limits
-        return resolve_joint_limit_arrays(joint_limits)
 
     def build_excitation_reference(self) -> ReferenceTrajectory:
         return build_excitation_trajectory(self.config)
@@ -267,185 +162,5 @@ class MujocoEnvironment:
             ee_quat[sample_idx] = data.xquat[self.ee_body_id].copy()
         return ee_pos, ee_quat
 
-    def get_true_friction_parameters(self) -> tuple[np.ndarray, np.ndarray]:
-        return (
-            self.model.dof_frictionloss[self.dof_addrs].copy(),
-            self.model.dof_damping[self.dof_addrs].copy(),
-        )
-
-    def build_clean_sample_mask(self, batch: FrictionSampleBatch) -> np.ndarray:
-        lower, upper, limited = self._get_joint_limits()
-        return _build_simulation_clean_sample_mask(
-            q=batch.q,
-            qd=batch.qd,
-            tau_constraint=batch.tau_constraint,
-            tau_friction=batch.tau_friction,
-            lower=lower,
-            upper=upper,
-            limited=limited,
-            limit_margin=float(self.config.safety.joint_limit_margin),
-            constraint_tolerance=0.35,
-            active_joints=self.config.target_joint_mask,
-        )
-
-    def reset(self, q_init: np.ndarray) -> None:
-        mujoco.mj_resetData(self.model, self.data)
-        self.data.ctrl[:] = 0.0
-        self.data.qfrc_applied[:] = 0.0
-        for qpos_addr, value in zip(self.qpos_addrs, np.asarray(q_init, dtype=np.float64).reshape(-1)):
-            self.data.qpos[qpos_addr] = value
-        mujoco.mj_forward(self.model, self.data)
-
-    def _get_joint_state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        q = self.data.qpos[self.qpos_addrs].copy()
-        qd = self.data.qvel[self.dof_addrs].copy()
-        qdd = self.data.qacc[self.dof_addrs].copy()
-        return q, qd, qdd
-
-    def _get_ee_pose(self) -> tuple[np.ndarray, np.ndarray]:
-        return self.data.xpos[self.ee_body_id].copy(), self.data.xquat[self.ee_body_id].copy()
-
-    def _get_friction_components(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        tau_passive = -self.data.qfrc_passive[self.dof_addrs].copy()
-        tau_constraint = -self.data.qfrc_constraint[self.dof_addrs].copy()
-        return tau_passive, tau_constraint, tau_passive + tau_constraint
-
-    def _set_torque(self, tau: np.ndarray) -> None:
-        tau = np.asarray(tau, dtype=np.float64).reshape(-1)
-        self.data.ctrl[:] = 0.0
-        self.data.qfrc_applied[:] = 0.0
-        self.data.qfrc_applied[self.dof_addrs] = tau
-
-    def _run_reference_unlogged(
-        self,
-        reference: ReferenceTrajectory,
-        controller: FrictionIdentificationController,
-        safety: SafetyGuard,
-        *,
-        torque_callback: TorqueCommandCallback | None = None,
-        realtime: bool,
-    ) -> None:
-        if torque_callback is None:
-            torque_callback = controller.compute_torque
-        sim_time = 0.0
-        sample_dt = 1.0 / self.config.sampling.rate
-        wall_start = time.time()
-        for sample_idx in range(reference.q_cmd.shape[0]):
-            q_curr, qd_curr, _ = self._get_joint_state()
-            safety.assert_joint_limits(q_curr)
-            _, _, tau = torque_callback(
-                q_cmd=reference.q_cmd[sample_idx],
-                qd_cmd=reference.qd_cmd[sample_idx],
-                qdd_cmd=reference.qdd_cmd[sample_idx],
-                q_curr=q_curr,
-                qd_curr=qd_curr,
-            )
-            self._set_torque(tau)
-            sim_time = self._step_until(
-                (sample_idx + 1) * sample_dt,
-                sim_time=sim_time,
-                wall_start=wall_start,
-                realtime=realtime,
-            )
-            q_meas, _, _ = self._get_joint_state()
-            safety.assert_joint_limits(q_meas)
-
-    def run_reference_trajectory(
-        self,
-        reference: ReferenceTrajectory,
-        controller: FrictionIdentificationController,
-        safety: SafetyGuard,
-        *,
-        startup_reference: ReferenceTrajectory | None = None,
-        torque_callback: TorqueCommandCallback | None = None,
-        realtime: bool = False,
-    ) -> FrictionSampleBatch:
-        if torque_callback is None:
-            torque_callback = controller.compute_torque
-        num_samples = reference.q_cmd.shape[0]
-        ee_pos_cmd, ee_quat_cmd = self.evaluate_end_effector_trajectory(reference.q_cmd)
-
-        initial_q = startup_reference.q_cmd[0] if startup_reference is not None else reference.q_cmd[0]
-        self.reset(initial_q)
-        self._open_viewer()
-
-        if startup_reference is not None:
-            self._run_reference_unlogged(
-                startup_reference,
-                controller,
-                safety,
-                torque_callback=torque_callback,
-                realtime=realtime,
-            )
-
-        time_log = np.asarray(reference.time, dtype=np.float64).copy()
-        q_log = np.zeros_like(reference.q_cmd)
-        qd_log = np.zeros_like(reference.q_cmd)
-        qdd_log = np.zeros_like(reference.q_cmd)
-        tau_ctrl_log = np.zeros_like(reference.q_cmd)
-        tau_passive_log = np.zeros_like(reference.q_cmd)
-        tau_constraint_log = np.zeros_like(reference.q_cmd)
-        tau_friction_log = np.zeros_like(reference.q_cmd)
-        ee_pos_log = np.zeros_like(ee_pos_cmd)
-        ee_quat_log = np.zeros_like(ee_quat_cmd)
-
-        sim_time = 0.0
-        wall_start = time.time()
-        sample_dt = 1.0 / self.config.sampling.rate
-
-        for sample_idx in range(num_samples):
-            q_curr, qd_curr, _ = self._get_joint_state()
-            safety.assert_joint_limits(q_curr)
-            _, _, tau = torque_callback(
-                q_cmd=reference.q_cmd[sample_idx],
-                qd_cmd=reference.qd_cmd[sample_idx],
-                qdd_cmd=reference.qdd_cmd[sample_idx],
-                q_curr=q_curr,
-                qd_curr=qd_curr,
-            )
-            self._set_torque(tau)
-            sim_time = self._step_until(
-                (sample_idx + 1) * sample_dt,
-                sim_time=sim_time,
-                wall_start=wall_start,
-                realtime=realtime,
-            )
-
-            q_meas, qd_meas, qdd_meas = self._get_joint_state()
-            safety.assert_joint_limits(q_meas)
-            ee_pos_meas, ee_quat_meas = self._get_ee_pose()
-            tau_passive, tau_constraint, tau_friction = self._get_friction_components()
-
-            q_log[sample_idx] = q_meas
-            qd_log[sample_idx] = qd_meas
-            qdd_log[sample_idx] = qdd_meas
-            tau_ctrl_log[sample_idx] = tau
-            tau_passive_log[sample_idx] = tau_passive
-            tau_constraint_log[sample_idx] = tau_constraint
-            tau_friction_log[sample_idx] = tau_friction
-            ee_pos_log[sample_idx] = ee_pos_meas
-            ee_quat_log[sample_idx] = ee_quat_meas
-
-        self._set_torque(np.zeros(self.config.joint_count, dtype=np.float64))
-        return FrictionSampleBatch(
-            time=time_log,
-            q=q_log,
-            qd=qd_log,
-            qdd=qdd_log,
-            ee_pos=ee_pos_log,
-            ee_quat=ee_quat_log,
-            q_cmd=reference.q_cmd.copy(),
-            qd_cmd=reference.qd_cmd.copy(),
-            qdd_cmd=reference.qdd_cmd.copy(),
-            ee_pos_cmd=ee_pos_cmd,
-            ee_quat_cmd=ee_quat_cmd,
-            tau_ctrl=tau_ctrl_log,
-            tau_passive=tau_passive_log,
-            tau_constraint=tau_constraint_log,
-            tau_friction=tau_friction_log,
-        )
-
     def close(self) -> None:
-        if self.viewer is not None:
-            self.viewer.close()
-            self.viewer = None
+        pass

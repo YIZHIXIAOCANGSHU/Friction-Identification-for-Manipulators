@@ -100,7 +100,7 @@ class SafetyGuard:
 
 
 class FrictionIdentificationController:
-    """Unified feedforward plus PD controller for both simulation and hardware."""
+    """Parallel tracking controller used during hardware collection."""
 
     def __init__(
         self,
@@ -114,7 +114,6 @@ class FrictionIdentificationController:
         self.kp = np.asarray(config.controller.kp, dtype=np.float64)
         self.kd = np.asarray(config.controller.kd, dtype=np.float64)
         self.feedback_scale = float(config.controller.feedback_scale)
-        self.target_joint = int(config.identification.target_joint)
 
     def compute_torque(
         self,
@@ -130,19 +129,10 @@ class FrictionIdentificationController:
         )
         tau = tau_ff + self.feedback_scale * tau_fb
 
-        mask = np.zeros_like(tau, dtype=bool)
-        mask[self.target_joint] = True
-        tau_ff = tau_ff.copy()
-        tau_fb = tau_fb.copy()
-        tau = tau.copy()
-        tau_ff[~mask] = 0.0
-        tau_fb[~mask] = 0.0
-        tau[~mask] = 0.0
-
         if self.safety is not None:
             tau = self.safety.clamp_torque(tau)
             tau = self.safety.soften_torque_near_joint_limits(q_curr, tau)
-        return tau_ff, tau_fb, tau
+        return tau_ff.copy(), tau_fb.copy(), tau.copy()
 
 
 def load_summary_vectors(summary_path: Path, joint_count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

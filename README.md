@@ -1,112 +1,180 @@
-# OpenArm 摩擦力辨识
+# OpenArm 7轴并行摩擦力辨识
 
-项目现在按 `plans/simplify_architecture_plan.md` 收敛为统一 pipeline 架构，旧的兼容包装层已经移除，只保留一套顶层实现：
+这个仓库当前已经收敛为 `真机专用` 的 7 轴并行摩擦力辨识链路，目标很明确：
+
+- 7 个关节同时执行全范围复合激励
+- 采集阶段并行控制、并行采样、并行辨识
+- 补偿验证阶段只发送摩擦补偿力矩
+- `rerun` 实时展示运动、力矩、状态和辨识结果
+
+## 给新 AI 的最快入口
+
+如果是第一次接手，建议按下面顺序读，通常 10 分钟内就能建立主线：
+
+1. `README.md`
+   - 先明确项目边界、运行模式、输出物和 `rerun` 页面结构。
+2. `friction_identification_core/default.yaml`
+   - 看默认 7 轴配置、批次数、控制器参数、安全窗口和输出文件命名。
+3. `friction_identification_core/pipeline.py`
+   - 看 collect / compensate 两条主流程如何编排。
+4. `friction_identification_core/sources/hardware.py`
+   - 这是最重要的真机入口，负责串口采集、控制闭环、在线 `rerun`、离线辨识输入整理。
+5. `friction_identification_core/visualization.py`
+   - 看 `rerun` 蓝图、实时曲线和辨识结果小图是怎么组织的。
+6. 按任务补读
+   - 轨迹改动看 `trajectory.py`
+   - 控制/安全改动看 `controller.py`
+   - 结果文件和 summary 改动看 `results.py`
+   - 派生状态和文本摘要看 `status.py`
+
+## 当前系统边界
+
+当前代码默认遵循下面这些前提：
+
+- `hardware only`，不再维护仿真主链路
+- 默认激活 7 个关节并行辨识
+- 只有两个运行模式：`collect` 和 `compensate`
+- `rerun` 是主调试入口，MuJoCo 只负责姿态/末端位姿可视化
+
+已经移除或不再作为主路径维护的内容：
+
+- 单关节 `target_joint`
+- 仿真入口
+- `full_feedforward`
+- 激励幅值 `amplitude_scale`
+- 基础频率 `base_frequency`
+
+## 主流程
+
+### 1. collect
+
+`collect` 会完成一整轮并行采集与辨识：
+
+1. 读取配置，初始化真机源、控制器、安全器、`rerun` 和 MuJoCo 姿态显示
+2. 生成 7 轴并行复合激励参考轨迹
+3. 真机闭环运行，实时记录 `q / qd / q_cmd / qd_cmd / torque / 温度 / UART`
+4. 采集后做速度滤波、刚体逆动力学、残差力矩筛样
+5. 对活跃关节独立拟合 `coulomb / viscous / offset`
+6. 保存批次结果，并在所有批次结束后输出 summary / report
+
+### 2. compensate
+
+`compensate` 只做摩擦补偿验证：
+
+1. 读取已有 summary 中的摩擦参数
+2. 真机运行补偿模式
+3. 记录补偿期的关节状态和力矩状态
+4. 输出补偿验证数据文件
+
+## 代码地图
 
 - `friction_identification_core/__main__.py`
-  - 统一 CLI 入口
-- `friction_identification_core/config.py`
-  - YAML 配置加载
+  - CLI 入口，只负责参数解析和调度 `pipeline`
 - `friction_identification_core/default.yaml`
-  - 默认配置
+  - 默认配置，建议先看
 - `friction_identification_core/pipeline.py`
-  - 仿真/真机共享的辨识流程
-- `friction_identification_core/sources/`
-  - `simulation.py` / `hardware.py` 数据源实现
+  - 主编排层，定义 collect / compensate 的批次逻辑
+- `friction_identification_core/sources/hardware.py`
+  - 真机串口采集、在线控制、实时记录、辨识输入准备
 - `friction_identification_core/controller.py`
-  - 控制、安全、补偿
+  - 跟踪控制、摩擦补偿、安全限幅
 - `friction_identification_core/trajectory.py`
-  - 轨迹生成
-- `friction_identification_core/estimator.py`
-  - 摩擦参数估计
-- `friction_identification_core/results.py`
-  - 单文件结果管理
-- `friction_identification_core/mujoco_env.py`
-  - MuJoCo 环境封装
-- `friction_identification_core/serial_protocol.py`
-  - 串口协议
+  - 全范围复合激励轨迹和启动过渡
 - `friction_identification_core/visualization.py`
-  - 可视化
-- `friction_identification_core/mujoco_support.py`
-  - MuJoCo 模型构建辅助
+  - `rerun` 蓝图、实时曲线、辨识参数小图
+- `friction_identification_core/results.py`
+  - 批次数据、summary、Markdown 报告、legacy JSON
+- `friction_identification_core/status.py`
+  - `rotation_state / range_ratio / limit_margin` 和文本摘要
+- `friction_identification_core/mujoco_env.py`
+  - MuJoCo 环境和参考轨迹接口
 
-## 快速开始
+## Rerun 页面约定
+
+当前 `rerun` 主要分成 6 个页面：
+
+- `Overview`
+  - 状态文本、辨识摘要、末端位姿，以及几个快速面板
+- `By Joint`
+  - 每个关节一个单独页签，把位置、速度、命令、力矩、温度、辨识参数都拆成小图
+- `Joint Motion`
+  - 按运动类参数看全关节对比
+- `Torque`
+  - 按力矩类参数看全关节对比
+- `Identification`
+  - 汇总柱状图 + 每个关节每个参数的单独小图
+- `Runtime`
+  - UART、有效样本比、温度、文本状态和 MuJoCo 姿态
+
+辨识参数小图的约定：
+
+- 路径在 `identification/history/<metric>/Jx`
+- 横轴是 `identification_batch`
+- 如果只有单批次结果，小图会显示一个点
+- 如果有多批次 summary，小图会显示该参数随批次的变化
+
+## 运行方式
+
+交互入口：
 
 ```bash
 ./run.sh
 ```
 
-默认会进入交互式菜单，通过数字选择运行模式，并显示当前配置文件与目标关节。
-
-快捷模式也保留：
+快捷入口：
 
 ```bash
-./run.sh sim
-./run.sh sim-ff
-./run.sh hw
-./run.sh hw-comp
-./run.sh hw-ff
+./run.sh collect
+./run.sh compensate
 ```
 
-其中 `real` 仍然兼容旧用法，等价于 `./run.sh hw`。
-
-默认配置文件：
-
-```text
-friction_identification_core/default.yaml
-```
-
-菜单模式下可直接：
-
-- 输入 `1` 启动仿真采集
-- 输入 `4` 启动真机补偿验证
-- 输入 `j` 临时切换目标关节
-- 输入 `c` 切换配置文件
-- 输入 `r` 重复上次运行
-
-底层统一 CLI 入口仍然可直接使用。
-
-仿真入口：
+底层 CLI：
 
 ```bash
-python3 -m friction_identification_core run --source sim --config friction_identification_core/default.yaml
-python3 -m friction_identification_core run --source sim --config friction_identification_core/default.yaml --mode full_feedforward
+python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode collect
+python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode compensate
+python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode collect --output results/debug
 ```
 
-真机入口：
+## 输出文件
 
-```bash
-python3 -m friction_identification_core run --source hw --config friction_identification_core/default.yaml --mode collect
-python3 -m friction_identification_core run --source hw --config friction_identification_core/default.yaml --mode compensate
-python3 -m friction_identification_core run --source hw --config friction_identification_core/default.yaml --mode full_feedforward
-```
+默认输出目录由 `output.results_dir` 指定，当前默认是 `results/`。
 
-## 配置方式
+核心产物：
 
-所有关键参数都在 YAML 里维护。最常改的是：
+- `hardware_capture_batch_01.npz`
+- `hardware_capture_batch_02.npz`
+- `hardware_identification_batch_01.npz`
+- `hardware_identification_summary.npz`
+- `hardware_identification_report.md`
+- `hardware_compensation_validation.npz`
+- `real_friction_identification_summary.json`
+  - legacy 汇总文件，方便兼容旧流程
 
-```yaml
-identification:
-  target_joint: 0
-```
+summary 中最关键的数据包括：
 
-一次只辨识一个电机，控制器只对该电机输出非零力矩，其他关节力矩为 0。
+- `coulomb / viscous / offset`
+- `validation_rmse / validation_r2`
+- `valid_sample_ratio / sample_count`
+- `batch_coulomb / batch_viscous / batch_offset`
+- `batch_validation_rmse / batch_validation_r2`
 
-## 输出结果
+## 常见改动入口
 
-结果默认写入 `results/`，核心文件为：
+如果后面要继续让 AI 改项目，直接按任务把入口告诉它会最快：
 
-- `simulation_results.npz`
-- `hardware_results.npz`
-
-新的 pipeline 会优先更新这两个聚合结果文件。
+- 改激励覆盖范围或时序：`friction_identification_core/trajectory.py`
+- 改控制律、补偿力矩或安全限幅：`friction_identification_core/controller.py`
+- 改串口采集节奏、真机记录字段或辨识筛样：`friction_identification_core/sources/hardware.py`
+- 改 `rerun` 页面布局或新增曲线：`friction_identification_core/visualization.py`
+- 改 summary 文件结构、批次统计或报告格式：`friction_identification_core/results.py`
+- 改文本摘要和旋转状态判定：`friction_identification_core/status.py`
 
 ## 依赖
 
 ```bash
 pip3 install -r requirements.txt
 ```
-
-`run.sh` 现在只做按需依赖检查，不会在每次启动时自动执行 `pip install`。
 
 主要依赖：
 

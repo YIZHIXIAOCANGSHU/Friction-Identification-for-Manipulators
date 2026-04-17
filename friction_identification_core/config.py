@@ -19,6 +19,10 @@ def _as_float_array(values: Any, *, shape: tuple[int, ...] | None = None) -> np.
     return array
 
 
+def _as_int_tuple(values: Any) -> tuple[int, ...]:
+    return tuple(int(item) for item in values)
+
+
 def _as_string_tuple(values: Any) -> tuple[str, ...]:
     return tuple(str(item) for item in values)
 
@@ -35,17 +39,15 @@ class RobotConfig:
 
 
 @dataclass(frozen=True)
-class FrictionConfig:
-    coulomb: np.ndarray
-    viscous: np.ndarray
-
-
-
-@dataclass(frozen=True)
 class ExcitationConfig:
+    profile: str
     duration: float
-    base_frequency: float
-    amplitude_scale: float
+    sweep_cycles: int
+    reversal_pause_s: float
+    zero_crossing_dither_s: float
+    harmonic_weights: np.ndarray
+    speed_schedule: np.ndarray
+    phase_offsets: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -57,9 +59,15 @@ class TransitionConfig:
 
 @dataclass(frozen=True)
 class IdentificationConfig:
-    target_joint: int
+    active_joints: tuple[int, ...]
     excitation: ExcitationConfig
     transition: TransitionConfig
+
+
+@dataclass(frozen=True)
+class BatchCollectionConfig:
+    num_batches: int
+    inter_batch_delay: float
 
 
 @dataclass(frozen=True)
@@ -108,27 +116,33 @@ class VisualizationConfig:
 
 
 @dataclass(frozen=True)
+class StatusConfig:
+    velocity_eps: float
+
+
+@dataclass(frozen=True)
 class OutputConfig:
     results_dir: Path
-    simulation_results_filename: str = "simulation_results.npz"
-    hardware_results_filename: str = "hardware_results.npz"
-    simulation_prefix: str = "friction_identification"
-    hardware_capture_prefix: str = "real_uart_capture"
-    hardware_ident_prefix: str = "real_friction_identification"
+    hardware_capture_prefix: str = "hardware_capture"
+    hardware_ident_prefix: str = "hardware_identification"
+    hardware_summary_filename: str = "hardware_identification_summary.npz"
+    hardware_report_filename: str = "hardware_identification_report.md"
+    hardware_compensation_filename: str = "hardware_compensation_validation.npz"
     legacy_summary_filename: str = "real_friction_identification_summary.json"
 
 
 @dataclass(frozen=True)
 class Config:
     robot: RobotConfig
-    simulation_friction: FrictionConfig
     identification: IdentificationConfig
+    batch_collection: BatchCollectionConfig
     controller: ControllerConfig
     safety: SafetyConfig
     sampling: SamplingConfig
     fitting: FittingConfig
     serial: SerialConfig
     visualization: VisualizationConfig
+    status: StatusConfig
     output: OutputConfig
     config_path: Path
     project_root: Path = PROJECT_ROOT
@@ -138,38 +152,34 @@ class Config:
         return len(self.robot.joint_names)
 
     @property
-    def target_joint(self) -> int:
-        return int(self.identification.target_joint)
+    def active_joint_indices(self) -> np.ndarray:
+        return np.asarray(self.identification.active_joints, dtype=np.int64)
 
     @property
-    def target_joint_name(self) -> str:
-        return self.robot.joint_names[self.target_joint]
-
-    @property
-    def target_joint_mask(self) -> np.ndarray:
+    def active_joint_mask(self) -> np.ndarray:
         mask = np.zeros(self.joint_count, dtype=bool)
-        mask[self.target_joint] = True
+        mask[self.active_joint_indices] = True
         return mask
+
+    @property
+    def active_joint_names(self) -> list[str]:
+        return [self.robot.joint_names[idx] for idx in self.identification.active_joints]
 
     @property
     def results_dir(self) -> Path:
         return self.output.results_dir
 
     @property
-    def simulation_results_path(self) -> Path:
-        return self.results_dir / self.output.simulation_results_filename
-
-    @property
-    def hardware_results_path(self) -> Path:
-        return self.results_dir / self.output.hardware_results_filename
-
-    @property
     def summary_path(self) -> Path:
-        return self.hardware_results_path
+        return self.results_dir / self.output.hardware_summary_filename
 
     @property
-    def legacy_summary_path(self) -> Path:
-        return self.results_dir / self.output.legacy_summary_filename
+    def report_path(self) -> Path:
+        return self.results_dir / self.output.hardware_report_filename
+
+    @property
+    def compensation_validation_path(self) -> Path:
+        return self.results_dir / self.output.hardware_compensation_filename
 
     def resolve_project_path(self, path: str | Path) -> Path:
         candidate = Path(path)
@@ -186,6 +196,45 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _parse_identification_config(raw: dict[str, Any], joint_count: int) -> IdentificationConfig:
+    active_joints = _as_int_tuple(raw["active_joints"])
+    if not active_joints:
+        raise ValueError("identification.active_joints must not be empty.")
+    if len(set(active_joints)) != len(active_joints):
+        raise ValueError("identification.active_joints must not contain duplicates.")
+    for joint_idx in active_joints:
+        if not 0 <= joint_idx < joint_count:
+            raise ValueError(f"active joint index {joint_idx} is outside [0, {joint_count - 1}].")
+
+    excitation_raw = raw["excitation"]
+    excitation = ExcitationConfig(
+        profile=str(excitation_raw["profile"]),
+        duration=float(excitation_raw["duration"]),
+        sweep_cycles=int(excitation_raw["sweep_cycles"]),
+        reversal_pause_s=float(excitation_raw["reversal_pause_s"]),
+        zero_crossing_dither_s=float(excitation_raw["zero_crossing_dither_s"]),
+        harmonic_weights=_as_float_array(excitation_raw["harmonic_weights"]),
+        speed_schedule=_as_float_array(excitation_raw["speed_schedule"]),
+        phase_offsets=_as_float_array(excitation_raw["phase_offsets"], shape=(joint_count,)),
+    )
+    if excitation.harmonic_weights.size == 0:
+        raise ValueError("identification.excitation.harmonic_weights must not be empty.")
+    if excitation.speed_schedule.size == 0:
+        raise ValueError("identification.excitation.speed_schedule must not be empty.")
+
+    transition_raw = raw["transition"]
+    transition = TransitionConfig(
+        max_ee_speed=float(transition_raw["max_ee_speed"]),
+        min_duration=float(transition_raw["min_duration"]),
+        settle_duration=float(transition_raw["settle_duration"]),
+    )
+    return IdentificationConfig(
+        active_joints=active_joints,
+        excitation=excitation,
+        transition=transition,
+    )
+
+
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
     config_path = Path(path)
     if not config_path.is_absolute():
@@ -195,7 +244,6 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
     robot_raw = raw["robot"]
     joint_names = _as_string_tuple(robot_raw["joint_names"])
     joint_count = len(joint_names)
-
     robot = RobotConfig(
         urdf_path=(PROJECT_ROOT / robot_raw["urdf_path"]).resolve(),
         joint_names=joint_names,
@@ -206,20 +254,12 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         end_effector_body=str(robot_raw["end_effector_body"]),
     )
 
-    simulation_friction_raw = raw["simulation_friction"]
-    simulation_friction = FrictionConfig(
-        coulomb=_as_float_array(simulation_friction_raw["coulomb"], shape=(joint_count,)),
-        viscous=_as_float_array(simulation_friction_raw["viscous"], shape=(joint_count,)),
-    )
+    identification = _parse_identification_config(raw["identification"], joint_count)
 
-    identification_raw = raw["identification"]
-    target_joint = int(identification_raw["target_joint"])
-    if not 0 <= target_joint < joint_count:
-        raise ValueError(f"identification.target_joint must be in [0, {joint_count - 1}].")
-    identification = IdentificationConfig(
-        target_joint=target_joint,
-        excitation=ExcitationConfig(**identification_raw["excitation"]),
-        transition=TransitionConfig(**identification_raw["transition"]),
+    batch_collection_raw = raw.get("batch_collection", {})
+    batch_collection = BatchCollectionConfig(
+        num_batches=int(batch_collection_raw.get("num_batches", 1)),
+        inter_batch_delay=float(batch_collection_raw.get("inter_batch_delay", 0.0)),
     )
 
     controller_raw = raw["controller"]
@@ -236,10 +276,11 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         soft_limit_zone=float(safety_raw.get("soft_limit_zone", 0.12)),
     )
 
+    sampling_raw = raw["sampling"]
     sampling = SamplingConfig(
-        rate=float(raw["sampling"]["rate"]),
-        timestep=float(raw["sampling"]["timestep"]),
-        hardware_reference_step_factor=float(raw["sampling"].get("hardware_reference_step_factor", 4.0)),
+        rate=float(sampling_raw["rate"]),
+        timestep=float(sampling_raw["timestep"]),
+        hardware_reference_step_factor=float(sampling_raw.get("hardware_reference_step_factor", 4.0)),
     )
 
     fitting_raw = raw["fitting"]
@@ -266,52 +307,61 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         uart_text_log_interval=int(visualization_raw.get("uart_text_log_interval", 100)),
     )
 
+    status_raw = raw.get("status", {})
+    status = StatusConfig(
+        velocity_eps=float(status_raw.get("velocity_eps", 0.02)),
+    )
+
     output_raw = raw["output"]
     output = OutputConfig(
         results_dir=(PROJECT_ROOT / output_raw["results_dir"]).resolve(),
-        simulation_results_filename=str(
-            output_raw.get("simulation_results_filename", "simulation_results.npz")
+        hardware_capture_prefix=str(output_raw.get("hardware_capture_prefix", "hardware_capture")),
+        hardware_ident_prefix=str(output_raw.get("hardware_ident_prefix", "hardware_identification")),
+        hardware_summary_filename=str(
+            output_raw.get("hardware_summary_filename", "hardware_identification_summary.npz")
         ),
-        hardware_results_filename=str(
-            output_raw.get("hardware_results_filename", "hardware_results.npz")
+        hardware_report_filename=str(
+            output_raw.get("hardware_report_filename", "hardware_identification_report.md")
         ),
-        simulation_prefix=str(output_raw.get("simulation_prefix", "friction_identification")),
-        hardware_capture_prefix=str(output_raw.get("hardware_capture_prefix", "real_uart_capture")),
-        hardware_ident_prefix=str(output_raw.get("hardware_ident_prefix", "real_friction_identification")),
+        hardware_compensation_filename=str(
+            output_raw.get("hardware_compensation_filename", "hardware_compensation_validation.npz")
+        ),
         legacy_summary_filename=str(
-            output_raw.get("legacy_summary_filename", output_raw.get("summary_filename", "real_friction_identification_summary.json"))
+            output_raw.get("legacy_summary_filename", "real_friction_identification_summary.json")
         ),
     )
 
     return Config(
         robot=robot,
-        simulation_friction=simulation_friction,
         identification=identification,
+        batch_collection=batch_collection,
         controller=controller,
         safety=safety,
         sampling=sampling,
         fitting=fitting,
         serial=serial,
         visualization=visualization,
+        status=status,
         output=output,
         config_path=config_path.resolve(),
     )
 
+
 __all__ = [
     "PROJECT_ROOT",
     "DEFAULT_CONFIG_PATH",
+    "BatchCollectionConfig",
     "Config",
-    "RobotConfig",
-    "FrictionConfig",
-    "ExcitationConfig",
-    "TransitionConfig",
-    "IdentificationConfig",
     "ControllerConfig",
+    "ExcitationConfig",
+    "IdentificationConfig",
+    "OutputConfig",
+    "RobotConfig",
     "SafetyConfig",
     "SamplingConfig",
-    "FittingConfig",
     "SerialConfig",
+    "StatusConfig",
+    "TransitionConfig",
     "VisualizationConfig",
-    "OutputConfig",
     "load_config",
 ]

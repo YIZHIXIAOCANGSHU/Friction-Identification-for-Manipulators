@@ -11,6 +11,7 @@ if TYPE_CHECKING:
         InverseDynamicsBackend,
         SafetyGuard,
     )
+    from friction_identification_core.results import IdentificationResults
     from friction_identification_core.trajectory import ReferenceTrajectory
 
 
@@ -101,7 +102,7 @@ class TrackingEvaluationResult:
 
 @dataclass
 class CollectedData:
-    """Unified collection payload used by both simulation and hardware sources."""
+    """Collected hardware payload for one batch or one compensation validation run."""
 
     source: str
     mode: str
@@ -114,13 +115,20 @@ class CollectedData:
     tau_measured: np.ndarray
     qdd: np.ndarray | None = None
     qdd_cmd: np.ndarray | None = None
-    tau_feedforward: np.ndarray | None = None
-    tau_feedback: np.ndarray | None = None
+    tau_track_ff: np.ndarray | None = None
+    tau_track_fb: np.ndarray | None = None
+    tau_friction_comp: np.ndarray | None = None
     tau_rigid: np.ndarray | None = None
+    tau_residual: np.ndarray | None = None
     tau_passive: np.ndarray | None = None
     tau_constraint: np.ndarray | None = None
     tau_friction: np.ndarray | None = None
     clean_mask: np.ndarray | None = None
+    rotation_state: np.ndarray | None = None
+    range_ratio: np.ndarray | None = None
+    limit_margin_remaining: np.ndarray | None = None
+    batch_index: np.ndarray | None = None
+    phase_name: np.ndarray | None = None
     ee_pos: np.ndarray | None = None
     ee_quat: np.ndarray | None = None
     ee_pos_cmd: np.ndarray | None = None
@@ -151,7 +159,7 @@ class IdentificationInputs:
 
 
 class DataSource(Protocol):
-    """Common source interface used by the simplified identification pipeline."""
+    """Hardware source interface used by the parallel identification pipeline."""
 
     source_name: str
     inverse_dynamics_backend: "InverseDynamicsBackend"
@@ -169,6 +177,8 @@ class DataSource(Protocol):
         reference: "ReferenceTrajectory | None",
         controller: "FrictionIdentificationController",
         safety: "SafetyGuard",
+        batch_index: int = 1,
+        total_batches: int = 1,
     ) -> CollectedData:
         ...
 
@@ -180,4 +190,7 @@ class DataSource(Protocol):
         data: CollectedData | None,
         result: FrictionIdentificationResult | None,
     ) -> None:
+        ...
+
+    def publish_summary(self, summary: "IdentificationResults") -> None:
         ...

@@ -10,20 +10,28 @@ from friction_identification_core.config import Config
 from friction_identification_core.controller import (
     FrictionIdentificationController,
     SafetyGuard,
+    has_compensation_results,
     load_compensation_parameters,
     predict_compensation_torque,
 )
 from friction_identification_core.models import CollectedData, FrictionIdentificationResult, IdentificationInputs
+from friction_identification_core.mujoco_env import MujocoEnvironment
+from friction_identification_core.mujoco_support import build_am_d02_model
+from friction_identification_core.results import IdentificationResults
+from friction_identification_core.runtime import log_info
 from friction_identification_core.serial_protocol import (
     RECV_FRAME_SIZE,
     SEND_FRAME_SIZE,
     SerialFrameReader,
     TorqueCommandFramePacker,
 )
-from friction_identification_core.mujoco_env import MujocoEnvironment
-from friction_identification_core.mujoco_support import build_am_d02_model
-from friction_identification_core.runtime import log_info
+from friction_identification_core.status import (
+    compute_limit_margin_remaining,
+    compute_range_ratio,
+    compute_rotation_state,
+)
 from friction_identification_core.trajectory import (
+    ReferenceSample,
     ReferenceTrajectory,
     build_startup_pose,
     sample_reference_trajectory,
@@ -55,16 +63,14 @@ class LiveReferenceState:
         self.trajectory_elapsed_s = 0.0
         self.startup_reference = env.build_startup_reference(q_start, startup_target)
         if self.startup_reference is not None and self.startup_reference.time.size > 0:
-            self.startup_duration = float(
-                self.startup_reference.time[-1] + 1.0 / self.sample_rate
-            )
+            self.startup_duration = float(self.startup_reference.time[-1] + 1.0 / self.sample_rate)
 
     def sample(
         self,
         elapsed_s: float,
         *,
         max_step_s: float | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> ReferenceSample:
         if self.reference_start_time is None:
             raise RuntimeError("Live reference has not been initialized.")
         if self.last_elapsed_s is None:
@@ -180,10 +186,7 @@ def _build_residual_clean_sample_mask(
     moving = np.any(np.abs(qd[:, active_joint_mask]) >= float(min_motion_speed), axis=1)
     residual_reasonable = np.all(
         np.abs(tau_residual[:, active_joint_mask])
-        <= (
-            np.asarray(torque_limits, dtype=np.float64)[active_joint_mask]
-            * float(torque_limit_scale)
-        ),
+        <= np.asarray(torque_limits, dtype=np.float64)[active_joint_mask] * float(torque_limit_scale),
         axis=1,
     )
     return finite & within_window & moving & residual_reasonable
@@ -251,6 +254,7 @@ class HardwareSource:
         self.reporter = build_hardware_reporter(config)
         self.pose_estimator = build_pose_estimator(config)
         self.inverse_dynamics_backend = self.env
+        self._summary_published = False
 
     def build_reference(self) -> ReferenceTrajectory:
         return self.env.build_excitation_reference()
@@ -265,10 +269,12 @@ class HardwareSource:
         reference: ReferenceTrajectory | None,
         controller: FrictionIdentificationController,
         safety: SafetyGuard,
+        batch_index: int = 1,
+        total_batches: int = 1,
     ) -> CollectedData:
-        if mode not in {"collect", "compensate", "full_feedforward"}:
-            raise ValueError("mode must be 'collect', 'compensate', or 'full_feedforward'.")
-        if mode in {"collect", "full_feedforward"} and reference is None:
+        if mode not in {"collect", "compensate"}:
+            raise ValueError("mode must be 'collect' or 'compensate'.")
+        if mode == "collect" and reference is None:
             reference = self.build_reference()
 
         try:
@@ -276,16 +282,16 @@ class HardwareSource:
         except ImportError as exc:
             raise RuntimeError("缺少 pyserial，请先安装 requirements.txt 中的依赖。") from exc
 
-        parameters = (
-            load_compensation_parameters(self.config.summary_path, self.config.joint_count)
-            if mode in {"compensate", "full_feedforward"}
-            else None
-        )
+        parameters = None
+        if mode == "compensate":
+            if not has_compensation_results(self.config.summary_path):
+                log_info("未找到历史辨识汇总，补偿模式将使用零摩擦补偿力矩。")
+            parameters = load_compensation_parameters(self.config.summary_path, self.config.joint_count)
 
         reference_state = None
         reference_max_step_s = None
         startup_target = None
-        if mode in {"collect", "full_feedforward"}:
+        if mode == "collect":
             assert reference is not None
             startup_target = build_startup_pose(self.config, reference)
             reference_state = LiveReferenceState(
@@ -306,18 +312,26 @@ class HardwareSource:
         tau_measured = np.zeros(self.config.joint_count, dtype=np.float64)
         mos_temp = np.zeros(self.config.joint_count, dtype=np.float64)
         coil_temp = np.zeros(self.config.joint_count, dtype=np.float64)
-        target_joint_idx = int(self.config.target_joint)
         last_feedback_time = np.full(self.config.joint_count, np.nan, dtype=np.float64)
+        previous_qd = np.zeros(self.config.joint_count, dtype=np.float64)
 
         time_log: list[float] = []
         q_log: list[np.ndarray] = []
         qd_log: list[np.ndarray] = []
         q_cmd_log: list[np.ndarray] = []
         qd_cmd_log: list[np.ndarray] = []
+        qdd_cmd_log: list[np.ndarray] = []
         tau_measured_log: list[np.ndarray] = []
         tau_command_log: list[np.ndarray] = []
-        tau_feedforward_log: list[np.ndarray] = []
-        tau_feedback_log: list[np.ndarray] = []
+        tau_track_ff_log: list[np.ndarray] = []
+        tau_track_fb_log: list[np.ndarray] = []
+        tau_friction_comp_log: list[np.ndarray] = []
+        tau_residual_log: list[np.ndarray] = []
+        rotation_state_log: list[np.ndarray] = []
+        range_ratio_log: list[np.ndarray] = []
+        limit_margin_log: list[np.ndarray] = []
+        batch_index_log: list[int] = []
+        phase_name_log: list[str] = []
         mos_temp_log: list[np.ndarray] = []
         coil_temp_log: list[np.ndarray] = []
         ee_pos_log: list[np.ndarray] = []
@@ -325,6 +339,11 @@ class HardwareSource:
         uart_cycle_hz_log: list[float] = []
         uart_latency_ms_log: list[float] = []
         uart_transfer_kbps_log: list[float] = []
+
+        active_joint_mask = self.config.active_joint_mask
+        active_joint_indices = np.flatnonzero(active_joint_mask)
+        safe_lower, safe_upper = safety.safe_joint_window()
+        valid_sample_count = 0
 
         start_time = None
         last_cycle_end = None
@@ -342,8 +361,9 @@ class HardwareSource:
         last_feedback_wait_log_time = None
 
         log_info(
-            "开始真机运行: "
-            f"mode={mode}, target=J{self.config.target_joint + 1}({self.config.target_joint_name}), "
+            "开始真机并行运行: "
+            f"mode={mode}, batch={batch_index}/{total_batches}, "
+            f"active_joints={[idx + 1 for idx in active_joint_indices]}, "
             f"port={self.config.serial.port}, baudrate={self.config.serial.baudrate}"
         )
 
@@ -362,7 +382,6 @@ class HardwareSource:
                     frame = frame_reader.pop_frame()
                     if frame is None:
                         break
-
                     if not 1 <= frame.motor_id <= self.config.joint_count:
                         continue
 
@@ -376,12 +395,13 @@ class HardwareSource:
                     last_feedback_time[idx] = frame_time
 
                 now = time.perf_counter()
-                target_feedback_available = np.isfinite(last_feedback_time[target_joint_idx])
-                target_feedback_fresh = target_feedback_available and (
-                    now - float(last_feedback_time[target_joint_idx])
-                ) < feedback_stale_timeout_s
+                active_feedback_times = last_feedback_time[active_joint_mask]
+                all_feedback_available = np.all(np.isfinite(active_feedback_times))
+                all_feedback_fresh = all_feedback_available and np.all(
+                    (now - active_feedback_times) < feedback_stale_timeout_s
+                )
 
-                if target_feedback_fresh and (
+                if all_feedback_fresh and (
                     last_cycle_end is None or (now - last_cycle_end) >= command_refresh_period_s
                 ):
                     cycle_end = now
@@ -397,54 +417,31 @@ class HardwareSource:
                         assert reference_state is not None
                         assert startup_target is not None
                         reference_state.initialize(self.env, q, startup_target, elapsed_s)
-                        q_cmd_ref, qd_cmd_ref, qdd_cmd_ref = reference_state.sample(
+                        reference_sample = reference_state.sample(
                             elapsed_s,
                             max_step_s=reference_max_step_s,
                         )
-                        tau_ff, tau_fb, tau_command = controller.compute_torque(
+                        q_cmd_ref = reference_sample.q_cmd
+                        qd_cmd_ref = reference_sample.qd_cmd
+                        qdd_cmd_ref = reference_sample.qdd_cmd
+                        phase_name = reference_sample.phase_name or "collect"
+                        tau_track_ff, tau_track_fb, tau_command = controller.compute_torque(
                             q_cmd=q_cmd_ref,
                             qd_cmd=qd_cmd_ref,
                             qdd_cmd=qdd_cmd_ref,
                             q_curr=q,
                             qd_curr=qd,
                         )
-                    elif mode == "full_feedforward":
-                        assert reference_state is not None
-                        assert startup_target is not None
-                        assert parameters is not None
-                        reference_state.initialize(self.env, q, startup_target, elapsed_s)
-                        q_cmd_ref, qd_cmd_ref, qdd_cmd_ref = reference_state.sample(
-                            elapsed_s,
-                            max_step_s=reference_max_step_s,
-                        )
-                        tau_ff, tau_fb, _ = controller.compute_torque(
-                            q_cmd=q_cmd_ref,
-                            qd_cmd=qd_cmd_ref,
-                            qdd_cmd=qdd_cmd_ref,
-                            q_curr=q,
-                            qd_curr=qd,
-                        )
-                        tau_friction = predict_compensation_torque(
-                            qd_cmd_ref,
-                            parameters,
-                            torque_limits=self.config.robot.torque_limits,
-                        )
-                        tau_ff_total = tau_ff + tau_friction
-                        tau_command = safety.soften_torque_near_joint_limits(
-                            q,
-                            safety.clamp_torque(
-                                tau_ff_total + controller.feedback_scale * tau_fb
-                            ),
-                        )
-                        tau_ff = tau_ff_total
+                        tau_friction_comp = np.zeros_like(q)
                     else:
                         assert parameters is not None
                         q_cmd_ref = q.copy()
                         qd_cmd_ref = np.zeros_like(q)
                         qdd_cmd_ref = np.zeros_like(q)
-                        tau_ff = np.zeros_like(q)
-                        tau_fb = np.zeros_like(q)
-                        tau_command = safety.soften_torque_near_joint_limits(
+                        phase_name = "compensate"
+                        tau_track_ff = np.zeros_like(q)
+                        tau_track_fb = np.zeros_like(q)
+                        tau_friction_comp = safety.soften_torque_near_joint_limits(
                             q,
                             safety.clamp_torque(
                                 predict_compensation_torque(
@@ -454,6 +451,36 @@ class HardwareSource:
                                 )
                             ),
                         )
+                        tau_command = tau_friction_comp.copy()
+
+                    qdd_live = (
+                        (qd - previous_qd) / cycle_period
+                        if cycle_period > 1e-9
+                        else np.zeros_like(qd)
+                    )
+                    previous_qd = qd.copy()
+                    tau_rigid_live = self.env.inverse_dynamics(q, qd, qdd_live)
+                    tau_residual = tau_measured - tau_rigid_live
+                    rotation_state = compute_rotation_state(
+                        qd,
+                        velocity_eps=self.config.status.velocity_eps,
+                    )
+                    range_ratio = compute_range_ratio(q, safe_lower, safe_upper)
+                    limit_margin_remaining = compute_limit_margin_remaining(q, safe_lower, safe_upper)
+                    sample_valid = bool(
+                        _build_residual_clean_sample_mask(
+                            q=q[None, :],
+                            qd=qd[None, :],
+                            tau_residual=tau_residual[None, :],
+                            lower=safe_lower,
+                            upper=safe_upper,
+                            torque_limits=self.config.robot.torque_limits,
+                            active_joints=active_joint_mask,
+                            min_motion_speed=max(float(self.config.fitting.min_velocity_threshold), 0.01),
+                        )[0]
+                    )
+                    valid_sample_count += int(sample_valid)
+                    valid_sample_ratio = valid_sample_count / max(step_index + 1, 1)
 
                     last_command_frame = frame_packer.pack(tau_command.astype(np.float32))
                     ser.write(last_command_frame)
@@ -474,10 +501,18 @@ class HardwareSource:
                     qd_log.append(qd.copy())
                     q_cmd_log.append(q_cmd_ref.copy())
                     qd_cmd_log.append(qd_cmd_ref.copy())
+                    qdd_cmd_log.append(qdd_cmd_ref.copy())
                     tau_measured_log.append(tau_measured.copy())
                     tau_command_log.append(tau_command.copy())
-                    tau_feedforward_log.append(tau_ff.copy())
-                    tau_feedback_log.append(tau_fb.copy())
+                    tau_track_ff_log.append(tau_track_ff.copy())
+                    tau_track_fb_log.append(tau_track_fb.copy())
+                    tau_friction_comp_log.append(tau_friction_comp.copy())
+                    tau_residual_log.append(tau_residual.copy())
+                    rotation_state_log.append(rotation_state.copy())
+                    range_ratio_log.append(range_ratio.copy())
+                    limit_margin_log.append(limit_margin_remaining.copy())
+                    batch_index_log.append(batch_index)
+                    phase_name_log.append(phase_name)
                     mos_temp_log.append(mos_temp.copy())
                     coil_temp_log.append(coil_temp.copy())
 
@@ -498,52 +533,60 @@ class HardwareSource:
                         self.reporter.log_step(
                             elapsed_s=elapsed_s,
                             step_index=step_index,
+                            batch_index=batch_index,
+                            total_batches=total_batches,
                             q=q,
                             qd=qd,
+                            q_cmd=q_cmd_ref,
+                            qd_cmd=qd_cmd_ref,
                             tau_measured=tau_measured,
                             tau_command=tau_command,
+                            tau_track_ff=tau_track_ff,
+                            tau_track_fb=tau_track_fb,
+                            tau_friction_comp=tau_friction_comp,
+                            tau_residual=tau_residual,
+                            rotation_state=rotation_state,
+                            range_ratio=range_ratio,
+                            limit_margin_remaining=limit_margin_remaining,
                             mos_temperature=mos_temp,
                             coil_temperature=coil_temp,
                             uart_cycle_hz=uart_cycle_hz,
                             uart_latency_ms=uart_latency_ms,
                             uart_transfer_kbps=uart_transfer_kbps,
+                            valid_sample_ratio=valid_sample_ratio,
+                            phase_name=phase_name,
                             ee_pos=ee_pos,
                             ee_quat=ee_quat,
-                            rx_text=None,
-                            tx_text=None,
                         )
 
-                    if mode in {"collect", "full_feedforward"} and reference_state.is_complete():
+                    if mode == "collect" and reference_state.is_complete():
                         termination_reason = "collection_complete"
                         break
 
-                if mode in {"collect", "full_feedforward"} and termination_reason == "collection_complete":
+                if mode == "collect" and termination_reason == "collection_complete":
                     break
 
                 if not emitted_sample:
                     now = time.perf_counter()
-                    if last_command_send_time is None or (
-                        now - last_command_send_time
-                    ) >= command_refresh_period_s:
-                        if not target_feedback_fresh:
+                    if last_command_send_time is None or (now - last_command_send_time) >= command_refresh_period_s:
+                        if not all_feedback_fresh:
                             last_command_frame = zero_frame
                         ser.write(last_command_frame)
                         last_command_send_time = now
 
-                    if not target_feedback_fresh and (
+                    if not all_feedback_fresh and (
                         last_feedback_wait_log_time is None
                         or (now - last_feedback_wait_log_time) >= 1.0
                     ):
-                        if target_feedback_available:
-                            last_seen_ms = (
-                                now - float(last_feedback_time[target_joint_idx])
-                            ) * 1000.0
-                            detail = (
-                                f"最近一次收到 J{target_joint_idx + 1} 反馈已过去 {last_seen_ms:.0f} ms"
-                            )
-                        else:
-                            detail = f"尚未收到 J{target_joint_idx + 1} 反馈"
-                        log_info(f"等待目标关节反馈，{detail}，继续发送零力矩保持安全。")
+                        missing = [idx + 1 for idx in active_joint_indices if not np.isfinite(last_feedback_time[idx])]
+                        stale = [
+                            idx + 1
+                            for idx in active_joint_indices
+                            if np.isfinite(last_feedback_time[idx])
+                            and (now - float(last_feedback_time[idx])) >= feedback_stale_timeout_s
+                        ]
+                        detail = f"missing={missing}, stale={stale}"
+                        log_info(f"等待全轴新鲜反馈，继续发送零力矩保持安全。{detail}")
                         last_feedback_wait_log_time = now
 
                     if not emitted_sample or bytes_waiting <= 0:
@@ -571,10 +614,7 @@ class HardwareSource:
             ee_quat = np.asarray(ee_quat_log, dtype=np.float64).reshape(-1, 4)
         else:
             ee_pos = np.zeros((q_array.shape[0], 3), dtype=np.float64)
-            ee_quat = np.tile(
-                np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float64),
-                (q_array.shape[0], 1),
-            )
+            ee_quat = np.tile(np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float64), (q_array.shape[0], 1))
 
         return CollectedData(
             source=self.source_name,
@@ -584,30 +624,39 @@ class HardwareSource:
             qd=np.asarray(qd_log, dtype=np.float64).reshape(-1, self.config.joint_count),
             q_cmd=np.asarray(q_cmd_log, dtype=np.float64).reshape(-1, self.config.joint_count),
             qd_cmd=np.asarray(qd_cmd_log, dtype=np.float64).reshape(-1, self.config.joint_count),
+            qdd_cmd=np.asarray(qdd_cmd_log, dtype=np.float64).reshape(-1, self.config.joint_count),
             tau_command=np.asarray(tau_command_log, dtype=np.float64).reshape(-1, self.config.joint_count),
             tau_measured=np.asarray(tau_measured_log, dtype=np.float64).reshape(-1, self.config.joint_count),
-            tau_feedforward=np.asarray(
-                tau_feedforward_log,
+            tau_track_ff=np.asarray(tau_track_ff_log, dtype=np.float64).reshape(-1, self.config.joint_count),
+            tau_track_fb=np.asarray(tau_track_fb_log, dtype=np.float64).reshape(-1, self.config.joint_count),
+            tau_friction_comp=np.asarray(
+                tau_friction_comp_log,
                 dtype=np.float64,
             ).reshape(-1, self.config.joint_count),
-            tau_feedback=np.asarray(
-                tau_feedback_log,
+            tau_residual=np.asarray(tau_residual_log, dtype=np.float64).reshape(-1, self.config.joint_count),
+            rotation_state=np.asarray(rotation_state_log, dtype=np.int8).reshape(-1, self.config.joint_count),
+            range_ratio=np.asarray(range_ratio_log, dtype=np.float64).reshape(-1, self.config.joint_count),
+            limit_margin_remaining=np.asarray(
+                limit_margin_log,
                 dtype=np.float64,
             ).reshape(-1, self.config.joint_count),
+            batch_index=np.asarray(batch_index_log, dtype=np.int64),
+            phase_name=np.asarray(phase_name_log, dtype="<U32"),
             ee_pos=ee_pos,
             ee_quat=ee_quat,
-            mos_temperature=np.asarray(
-                mos_temp_log,
-                dtype=np.float64,
-            ).reshape(-1, self.config.joint_count),
-            coil_temperature=np.asarray(
-                coil_temp_log,
-                dtype=np.float64,
-            ).reshape(-1, self.config.joint_count),
+            mos_temperature=np.asarray(mos_temp_log, dtype=np.float64).reshape(-1, self.config.joint_count),
+            coil_temperature=np.asarray(coil_temp_log, dtype=np.float64).reshape(-1, self.config.joint_count),
             uart_cycle_hz=np.asarray(uart_cycle_hz_log, dtype=np.float64),
             uart_latency_ms=np.asarray(uart_latency_ms_log, dtype=np.float64),
             uart_transfer_kbps=np.asarray(uart_transfer_kbps_log, dtype=np.float64),
-            metadata={"termination_reason": termination_reason},
+            metadata={
+                "termination_reason": termination_reason,
+                "batch_index": batch_index,
+                "total_batches": total_batches,
+                "fit_joint_indices": active_joint_indices.tolist(),
+                "active_joint_indices": active_joint_indices.tolist(),
+                "valid_sample_ratio_live": (valid_sample_count / max(step_index, 1)) if step_index > 0 else 0.0,
+            },
         )
 
     def prepare_identification(self, data: CollectedData) -> IdentificationInputs | None:
@@ -615,28 +664,25 @@ class HardwareSource:
             log_info("真机样本过少，跳过实际数据辨识。")
             return None
 
-        qd_filtered, qdd, filter_metadata = _smooth_velocity_and_estimate_acceleration(
-            data.time,
-            data.qd,
-        )
+        qd_filtered, qdd, filter_metadata = _smooth_velocity_and_estimate_acceleration(data.time, data.qd)
         dynamics = RigidBodyDynamics(
             model_path=str(self.config.robot.urdf_path),
             joint_names=list(self.config.robot.joint_names),
             tcp_offset=self.config.robot.tcp_offset,
         )
         tau_rigid = dynamics.batch_inverse_dynamics(data.q, qd_filtered, qdd)
-        tau_friction = data.tau_measured - tau_rigid
+        tau_residual = data.tau_measured - tau_rigid
 
-        safety = SafetyGuard(self.config, active_joint_mask=self.config.target_joint_mask)
+        safety = SafetyGuard(self.config, active_joint_mask=self.config.active_joint_mask)
         lower, upper = safety.safe_joint_window()
         clean_mask = _build_residual_clean_sample_mask(
             q=data.q,
             qd=qd_filtered,
-            tau_residual=tau_friction,
+            tau_residual=tau_residual,
             lower=lower,
             upper=upper,
             torque_limits=self.config.robot.torque_limits,
-            active_joints=self.config.target_joint_mask,
+            active_joints=self.config.active_joint_mask,
             min_motion_speed=max(float(self.config.fitting.min_velocity_threshold), 0.01),
         )
         retained = int(np.count_nonzero(clean_mask))
@@ -646,16 +692,22 @@ class HardwareSource:
 
         data.qdd = qdd
         data.tau_rigid = tau_rigid
-        data.tau_friction = tau_friction
+        data.tau_residual = tau_residual
+        data.tau_friction = tau_residual
         data.clean_mask = clean_mask
-        data.metadata.update(filter_metadata)
+        data.metadata.update(
+            filter_metadata,
+            retained_samples=retained,
+            valid_sample_ratio=(retained / max(data.sample_count, 1)),
+            fit_joint_indices=self.config.active_joint_indices.tolist(),
+        )
 
-        qd_clean = qd_filtered[clean_mask]
-        tau_clean = tau_friction[clean_mask]
+        qd_clean = qd_filtered[clean_mask][:, self.config.active_joint_mask]
+        tau_clean = tau_residual[clean_mask][:, self.config.active_joint_mask]
         return IdentificationInputs(
-            velocity=qd_clean[:, self.config.target_joint_mask],
-            torque=tau_clean[:, self.config.target_joint_mask],
-            joint_names=[self.config.target_joint_name],
+            velocity=qd_clean,
+            torque=tau_clean,
+            joint_names=self.config.active_joint_names,
             clean_mask=clean_mask,
             metadata={**filter_metadata, "retained_samples": retained},
         )
@@ -665,6 +717,12 @@ class HardwareSource:
         data: CollectedData | None,
         result: FrictionIdentificationResult | None,
     ) -> None:
+        if self.reporter is not None and result is not None and not self._summary_published:
+            self.reporter.log_identification_summary(
+                result,
+                active_joint_names=self.config.active_joint_names,
+                active_joint_indices=self.config.active_joint_indices.tolist(),
+            )
         if self.reporter is not None:
             self.reporter.close()
             self.reporter = None
@@ -672,3 +730,8 @@ class HardwareSource:
             self.pose_estimator.close()
             self.pose_estimator = None
         self.env.close()
+
+    def publish_summary(self, summary: IdentificationResults) -> None:
+        if self.reporter is not None:
+            self.reporter.log_loaded_summary(summary)
+            self._summary_published = True
