@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -575,7 +576,9 @@ class HardwareRerunReporter:
 
             rr.log(f"safety/limit_margin_remaining/J{joint_id}", rr.Scalars(float(limit_margin_remaining[idx])))
             rr.log(f"health/mos_temperature/J{joint_id}", rr.Scalars(float(mos_temperature[idx])))
-            rr.log(f"health/coil_temperature/J{joint_id}", rr.Scalars(float(coil_temperature[idx])))
+            coil_value = float(coil_temperature[idx])
+            if np.isfinite(coil_value):
+                rr.log(f"health/coil_temperature/J{joint_id}", rr.Scalars(coil_value))
 
         rr.log("runtime/uart_cycle_hz", rr.Scalars(float(uart_cycle_hz)))
         rr.log("runtime/uart_latency_ms", rr.Scalars(float(uart_latency_ms)))
@@ -646,7 +649,11 @@ class HardwareRerunReporter:
     def log_loaded_summary(self, summary: "IdentificationResults") -> None:
         joint_names = [joint.joint_name for joint in summary.joint_results]
         self._log_identification_metrics(
-            title="Hardware Parallel Identification Summary",
+            title=(
+                "Hardware Sequential Identification Summary"
+                if str(summary.metadata.get("mode", "")).strip().lower() == "sequential"
+                else "Hardware Parallel Identification Summary"
+            ),
             joint_names=joint_names,
             coulomb=np.asarray([joint.coulomb for joint in summary.joint_results], dtype=np.float64),
             viscous=np.asarray([joint.viscous for joint in summary.joint_results], dtype=np.float64),
@@ -820,10 +827,282 @@ class HardwareRerunReporter:
                     continue
                 rr.log(_identification_history_path(metric_key, int(joint_idx) + 1), rr.Scalars(value))
 
+    def log_sequential_progress(
+        self,
+        *,
+        group_index: int,
+        total_groups: int,
+        joint_index: int,
+        active_joint_indices: list[int] | np.ndarray,
+        completed_joint_indices: list[int] | np.ndarray,
+    ) -> None:
+        if self._rr is None:
+            return
+        active_joint_indices = [int(idx) for idx in np.asarray(active_joint_indices, dtype=np.int64).reshape(-1)]
+        completed = set(int(idx) for idx in np.asarray(completed_joint_indices, dtype=np.int64).reshape(-1))
+        progress_tokens = [
+            f"J{joint_idx + 1}{' done' if joint_idx in completed else (' current' if joint_idx == int(joint_index) else '')}"
+            for joint_idx in active_joint_indices
+        ]
+        self._rr.log(
+            "runtime/sequential_progress",
+            self._rr.TextDocument(
+                "\n".join(
+                    [
+                        "# Sequential Progress",
+                        "",
+                        f"- Group: `{int(group_index)}/{int(total_groups)}`",
+                        f"- Current Joint: `J{int(joint_index) + 1}`",
+                        f"- Progress: `{', '.join(progress_tokens)}`",
+                    ]
+                ),
+                media_type="text/markdown",
+            ),
+        )
+
     def close(self) -> None:
         if self._rr is not None:
             self._rr.disconnect()
             self._rr = None
+
+
+class FocusedJointReporter(HardwareRerunReporter):
+    """Rerun dashboard that only keeps the active identification joint in view."""
+
+    def __init__(
+        self,
+        *,
+        app_name: str,
+        joint_names: list[str],
+        spawn: bool = True,
+        show_ee_view: bool = True,
+    ) -> None:
+        super().__init__(
+            app_name=app_name,
+            joint_names=joint_names,
+            spawn=spawn,
+            show_ee_view=show_ee_view,
+        )
+        self.focus_joint_index = 0
+
+    def init(self) -> None:
+        import rerun as rr
+
+        self._rr = rr
+        rr.init(self.app_name, spawn=self.spawn)
+        self._log_static_series_metadata()
+        self._send_focused_blueprint()
+
+    def _send_focused_blueprint(self) -> None:
+        if self._rr is None:
+            return
+        import rerun.blueprint as rrb
+
+        joint_id = int(self.focus_joint_index) + 1
+        overview_panels = [
+            rrb.Vertical(
+                rrb.TextDocumentView(name="Runtime Status", origin="/runtime/status"),
+                rrb.TextDocumentView(name="Sequential Progress", origin="/runtime/sequential_progress"),
+                rrb.TextDocumentView(name="Joint Summary", origin="/runtime/joint_summary"),
+                row_shares=[0.8, 0.8, 1.1],
+                name="Live Status",
+            ),
+            rrb.TextDocumentView(name="Identification Summary", origin="/identification/summary"),
+        ]
+        column_shares = [1.0, 1.2]
+        if self.show_ee_view:
+            overview_panels.append(rrb.Spatial3DView(name="EE Pose", origin="/trajectory_3d"))
+            column_shares.append(0.9)
+
+        self._rr.send_blueprint(
+            rrb.Blueprint(
+                rrb.Tabs(
+                    rrb.Vertical(
+                        rrb.Horizontal(
+                            *overview_panels,
+                            column_shares=column_shares,
+                            name="Status Overview",
+                        ),
+                        rrb.Grid(
+                            rrb.TimeSeriesView(
+                                name=f"J{joint_id} Position",
+                                origin=f"/{_joint_entity_path('joint_state/q', joint_id)}",
+                            ),
+                            rrb.TimeSeriesView(
+                                name=f"J{joint_id} Velocity",
+                                origin=f"/{_joint_entity_path('joint_state/qd', joint_id)}",
+                            ),
+                            rrb.TimeSeriesView(
+                                name=f"J{joint_id} Cmd Position",
+                                origin=f"/{_joint_entity_path('joint_state/q_cmd', joint_id)}",
+                            ),
+                            rrb.TimeSeriesView(
+                                name=f"J{joint_id} Cmd Velocity",
+                                origin=f"/{_joint_entity_path('joint_state/qd_cmd', joint_id)}",
+                            ),
+                            rrb.TimeSeriesView(
+                                name=f"J{joint_id} Measured Torque",
+                                origin=f"/{_joint_entity_path('torque/measured', joint_id)}",
+                            ),
+                            rrb.TimeSeriesView(
+                                name=f"J{joint_id} Command Torque",
+                                origin=f"/{_joint_entity_path('torque/command', joint_id)}",
+                            ),
+                            rrb.TimeSeriesView(
+                                name=f"J{joint_id} Residual Torque",
+                                origin=f"/{_joint_entity_path('torque/residual', joint_id)}",
+                            ),
+                            rrb.TimeSeriesView(
+                                name=f"J{joint_id} Limit Margin",
+                                origin=f"/{_joint_entity_path('safety/limit_margin_remaining', joint_id)}",
+                            ),
+                            grid_columns=2,
+                            name=f"J{joint_id} Focus",
+                        ),
+                        rrb.Horizontal(
+                            self._aggregate_identification_grid(rrb),
+                            self._identification_history_grid(
+                                rrb,
+                                joint_ids=[joint_id],
+                                name=f"J{joint_id} Identification History",
+                                grid_columns=3,
+                            ),
+                            column_shares=[1.0, 1.2],
+                            name="Identification",
+                        ),
+                        name="Overview",
+                    ),
+                    self._joint_tab(rrb, joint_id=joint_id),
+                ),
+                collapse_panels=True,
+            )
+        )
+
+    def set_focus_joint(self, joint_index: int) -> None:
+        joint_index = int(joint_index)
+        if not 0 <= joint_index < len(self.joint_names):
+            raise ValueError(f"joint_index must be within [0, {len(self.joint_names) - 1}].")
+        if joint_index == self.focus_joint_index and self._rr is not None:
+            return
+        self.focus_joint_index = joint_index
+        self._send_focused_blueprint()
+
+    def log_step(
+        self,
+        *,
+        elapsed_s: float,
+        step_index: int,
+        batch_index: int,
+        total_batches: int,
+        q: np.ndarray,
+        qd: np.ndarray,
+        q_cmd: np.ndarray,
+        qd_cmd: np.ndarray,
+        tau_measured: np.ndarray,
+        tau_command: np.ndarray,
+        tau_track_ff: np.ndarray,
+        tau_track_fb: np.ndarray,
+        tau_friction_comp: np.ndarray,
+        tau_residual: np.ndarray,
+        rotation_state: np.ndarray,
+        range_ratio: np.ndarray,
+        limit_margin_remaining: np.ndarray,
+        mos_temperature: np.ndarray,
+        coil_temperature: np.ndarray,
+        uart_cycle_hz: float,
+        uart_latency_ms: float,
+        uart_transfer_kbps: float,
+        valid_sample_ratio: float,
+        phase_name: str,
+        active_joint_ids: list[int] | np.ndarray,
+        feedback_cycle_joint_ids: list[int] | np.ndarray,
+        ee_pos: np.ndarray | None,
+        ee_quat: np.ndarray | None,
+    ) -> None:
+        if self._rr is None:
+            return
+        rr = self._rr
+        rr.set_time_seconds("time", float(elapsed_s))
+        rr.set_time_sequence("step", int(step_index))
+
+        focus_idx = int(self.focus_joint_index)
+        joint_id = focus_idx + 1
+        rr.log(f"joint_state/q/J{joint_id}", rr.Scalars(float(q[focus_idx])))
+        rr.log(f"joint_state/qd/J{joint_id}", rr.Scalars(float(qd[focus_idx])))
+        rr.log(f"joint_state/q_cmd/J{joint_id}", rr.Scalars(float(q_cmd[focus_idx])))
+        rr.log(f"joint_state/qd_cmd/J{joint_id}", rr.Scalars(float(qd_cmd[focus_idx])))
+        rr.log(f"joint_state/rotation_state/J{joint_id}", rr.Scalars(int(rotation_state[focus_idx])))
+        rr.log(f"joint_state/range_ratio/J{joint_id}", rr.Scalars(float(range_ratio[focus_idx])))
+        rr.log(f"joint_state/phase/J{joint_id}", rr.Scalars(_phase_code(phase_name)))
+
+        rr.log(f"torque/measured/J{joint_id}", rr.Scalars(float(tau_measured[focus_idx])))
+        rr.log(f"torque/command/J{joint_id}", rr.Scalars(float(tau_command[focus_idx])))
+        rr.log(f"torque/friction_comp/J{joint_id}", rr.Scalars(float(tau_friction_comp[focus_idx])))
+        rr.log(f"torque/residual/J{joint_id}", rr.Scalars(float(tau_residual[focus_idx])))
+        rr.log(f"torque/track_ff/J{joint_id}", rr.Scalars(float(tau_track_ff[focus_idx])))
+        rr.log(f"torque/track_fb/J{joint_id}", rr.Scalars(float(tau_track_fb[focus_idx])))
+
+        rr.log(
+            f"safety/limit_margin_remaining/J{joint_id}",
+            rr.Scalars(float(limit_margin_remaining[focus_idx])),
+        )
+        rr.log(f"health/mos_temperature/J{joint_id}", rr.Scalars(float(mos_temperature[focus_idx])))
+        coil_value = float(coil_temperature[focus_idx])
+        if np.isfinite(coil_value):
+            rr.log(f"health/coil_temperature/J{joint_id}", rr.Scalars(coil_value))
+
+        rr.log("runtime/uart_cycle_hz", rr.Scalars(float(uart_cycle_hz)))
+        rr.log("runtime/uart_latency_ms", rr.Scalars(float(uart_latency_ms)))
+        rr.log("runtime/uart_transfer_kbps", rr.Scalars(float(uart_transfer_kbps)))
+        rr.log("runtime/valid_sample_ratio", rr.Scalars(float(valid_sample_ratio)))
+        rr.log("runtime/batch_index", rr.Scalars(float(batch_index)))
+
+        rr.log(
+            "runtime/status",
+            rr.TextDocument(
+                format_runtime_status(
+                    batch_index=batch_index,
+                    total_batches=total_batches,
+                    step_index=step_index,
+                    phase_name=phase_name,
+                    valid_sample_ratio=valid_sample_ratio,
+                    uart_cycle_hz=uart_cycle_hz,
+                    uart_latency_ms=uart_latency_ms,
+                    uart_transfer_kbps=uart_transfer_kbps,
+                ),
+                media_type="text/markdown",
+            ),
+        )
+        rr.log(
+            "runtime/feedback_cycle",
+            rr.TextDocument(
+                format_feedback_cycle_summary(active_joint_ids, feedback_cycle_joint_ids),
+                media_type="text/markdown",
+            ),
+        )
+        rr.log(
+            "runtime/joint_summary",
+            rr.TextDocument(
+                format_joint_motion_summary(
+                    [self.joint_names[focus_idx]],
+                    np.asarray([rotation_state[focus_idx]], dtype=np.int8),
+                    np.asarray([range_ratio[focus_idx]], dtype=np.float64),
+                    np.asarray([qd[focus_idx]], dtype=np.float64),
+                ),
+                media_type="text/markdown",
+            ),
+        )
+
+        if ee_pos is not None:
+            rr.log(
+                "trajectory_3d/ee",
+                rr.Points3D(
+                    [np.asarray(ee_pos, dtype=np.float64)],
+                    colors=[[230, 100, 50]],
+                    radii=[0.012],
+                    labels=["ee"],
+                ),
+            )
 
 
 class PoseEstimator:
@@ -908,8 +1187,12 @@ def build_hardware_reporter(config: Config):
         return None
 
     try:
-        reporter = HardwareRerunReporter(
-            app_name="AM-D02 Parallel Hardware Friction Identification",
+        reporter_cls = FocusedJointReporter if config.visualization.rerun_mode == "focused" else HardwareRerunReporter
+        mode_label = "Sequential" if config.identification.mode == "sequential" else "Parallel"
+        scope_label = "Focused" if config.visualization.rerun_mode == "focused" else "Full"
+        session_label = f"{time.strftime('%Y%m%d_%H%M%S')}_pid{os.getpid()}"
+        reporter = reporter_cls(
+            app_name=f"AM-D02 {mode_label} Hardware Friction Identification ({scope_label}) [{session_label}]",
             joint_names=list(config.robot.joint_names),
             spawn=True,
             show_ee_view=bool(config.visualization.render),
@@ -940,6 +1223,7 @@ def build_pose_estimator(config: Config):
 
 
 __all__ = [
+    "FocusedJointReporter",
     "HardwareRerunReporter",
     "PoseEstimator",
     "build_hardware_reporter",

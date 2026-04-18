@@ -113,10 +113,22 @@ class MujocoEnvironment:
         mujoco.mj_inverse(self.inverse_model, self.inverse_data)
         return self.inverse_data.qfrc_inverse[self.dof_addrs].copy()
 
-    def build_excitation_reference(self) -> ReferenceTrajectory:
-        return build_excitation_trajectory(self.config)
+    def build_excitation_reference(
+        self,
+        *,
+        joint_index: int | None = None,
+        duration: float | None = None,
+    ) -> ReferenceTrajectory:
+        return build_excitation_trajectory(self.config, joint_index=joint_index, duration=duration)
 
-    def build_startup_reference(self, start_q: np.ndarray, goal_q: np.ndarray) -> ReferenceTrajectory | None:
+    def build_startup_reference(
+        self,
+        start_q: np.ndarray,
+        goal_q: np.ndarray,
+        *,
+        duration_override: float | None = None,
+        settle_duration_override: float | None = None,
+    ) -> ReferenceTrajectory | None:
         start_q = np.asarray(start_q, dtype=np.float64).reshape(-1)
         goal_q = np.asarray(goal_q, dtype=np.float64).reshape(-1)
         if np.allclose(start_q, goal_q, atol=1e-9):
@@ -139,13 +151,20 @@ class MujocoEnvironment:
 
         transition_cfg = self.config.identification.transition
         max_ee_speed = max(float(transition_cfg.max_ee_speed), 1e-6)
-        duration = max(float(transition_cfg.min_duration), peak_ee_speed_unit / max_ee_speed)
+        if duration_override is None:
+            duration = max(float(transition_cfg.min_duration), peak_ee_speed_unit / max_ee_speed)
+        else:
+            duration = max(float(duration_override), 1e-6)
         return build_quintic_point_to_point_trajectory(
             start_q=start_q,
             goal_q=goal_q,
             duration=duration,
             sample_rate=sample_rate,
-            settle_duration=float(transition_cfg.settle_duration),
+            settle_duration=(
+                float(transition_cfg.settle_duration)
+                if settle_duration_override is None
+                else max(float(settle_duration_override), 0.0)
+            ),
         )
 
     def evaluate_end_effector_trajectory(self, q_cmd: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

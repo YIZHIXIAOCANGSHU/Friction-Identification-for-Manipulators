@@ -135,6 +135,8 @@
 快捷入口：
 
 ```bash
+./run.sh default
+./run.sh sequential
 ./run.sh collect
 ./run.sh compensate
 ./run.sh compare
@@ -143,6 +145,7 @@
 底层 CLI：
 
 ```bash
+python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode sequential
 python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode collect
 python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode compensate
 python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode compare

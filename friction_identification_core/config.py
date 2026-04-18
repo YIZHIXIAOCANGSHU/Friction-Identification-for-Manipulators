@@ -59,8 +59,19 @@ class TransitionConfig:
 
 
 @dataclass(frozen=True)
+class SequentialConfig:
+    joint_duration: float
+    zero_position_duration: float
+    inter_joint_delay: float
+    num_groups: int
+    inter_group_delay: float
+
+
+@dataclass(frozen=True)
 class IdentificationConfig:
+    mode: str
     active_joints: tuple[int, ...]
+    sequential: SequentialConfig
     excitation: ExcitationConfig
     transition: TransitionConfig
 
@@ -112,6 +123,7 @@ class SerialConfig:
 class VisualizationConfig:
     render: bool
     spawn_rerun: bool
+    rerun_mode: str
     viewer_fps: float = 30.0
     rerun_log_stride: int = 5
     uart_text_log_interval: int = 100
@@ -199,6 +211,10 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _parse_identification_config(raw: dict[str, Any], joint_count: int) -> IdentificationConfig:
+    mode = str(raw.get("mode", "parallel")).strip().lower()
+    if mode not in {"parallel", "sequential"}:
+        raise ValueError("identification.mode must be 'parallel' or 'sequential'.")
+
     active_joints = _as_int_tuple(raw["active_joints"])
     if not active_joints:
         raise ValueError("identification.active_joints must not be empty.")
@@ -227,6 +243,25 @@ def _parse_identification_config(raw: dict[str, Any], joint_count: int) -> Ident
     if excitation.speed_schedule.size == 0:
         raise ValueError("identification.excitation.speed_schedule must not be empty.")
 
+    sequential_raw = raw.get("sequential", {})
+    sequential = SequentialConfig(
+        joint_duration=float(sequential_raw.get("joint_duration", excitation.duration)),
+        zero_position_duration=float(sequential_raw.get("zero_position_duration", 3.0)),
+        inter_joint_delay=float(sequential_raw.get("inter_joint_delay", 2.0)),
+        num_groups=int(sequential_raw.get("num_groups", 1)),
+        inter_group_delay=float(sequential_raw.get("inter_group_delay", 0.0)),
+    )
+    if sequential.joint_duration <= 0.0:
+        raise ValueError("identification.sequential.joint_duration must be > 0.")
+    if sequential.zero_position_duration < 0.0:
+        raise ValueError("identification.sequential.zero_position_duration must be >= 0.")
+    if sequential.inter_joint_delay < 0.0:
+        raise ValueError("identification.sequential.inter_joint_delay must be >= 0.")
+    if sequential.num_groups <= 0:
+        raise ValueError("identification.sequential.num_groups must be >= 1.")
+    if sequential.inter_group_delay < 0.0:
+        raise ValueError("identification.sequential.inter_group_delay must be >= 0.")
+
     transition_raw = raw["transition"]
     transition = TransitionConfig(
         max_ee_speed=float(transition_raw["max_ee_speed"]),
@@ -234,7 +269,9 @@ def _parse_identification_config(raw: dict[str, Any], joint_count: int) -> Ident
         settle_duration=float(transition_raw["settle_duration"]),
     )
     return IdentificationConfig(
+        mode=mode,
         active_joints=active_joints,
+        sequential=sequential,
         excitation=excitation,
         transition=transition,
     )
@@ -308,9 +345,18 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
     )
 
     visualization_raw = raw["visualization"]
+    rerun_mode = str(
+        visualization_raw.get(
+            "rerun_mode",
+            "focused" if identification.mode == "sequential" else "full",
+        )
+    ).strip().lower()
+    if rerun_mode not in {"full", "focused"}:
+        raise ValueError("visualization.rerun_mode must be 'full' or 'focused'.")
     visualization = VisualizationConfig(
         render=bool(visualization_raw["render"]),
         spawn_rerun=bool(visualization_raw["spawn_rerun"]),
+        rerun_mode=rerun_mode,
         viewer_fps=float(visualization_raw.get("viewer_fps", 30.0)),
         rerun_log_stride=int(visualization_raw.get("rerun_log_stride", 5)),
         uart_text_log_interval=int(visualization_raw.get("uart_text_log_interval", 100)),
@@ -367,6 +413,7 @@ __all__ = [
     "OutputConfig",
     "RobotConfig",
     "SafetyConfig",
+    "SequentialConfig",
     "SamplingConfig",
     "SerialConfig",
     "StatusConfig",

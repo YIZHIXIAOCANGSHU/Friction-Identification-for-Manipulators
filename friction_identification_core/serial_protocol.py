@@ -9,7 +9,8 @@ import numpy as np
 
 
 RECV_FRAME_HEAD = 0xA5
-RECV_FRAME_FORMAT = "<BBBfffff"
+# head, motor_id, state, pos, vel, tor, Tmos
+RECV_FRAME_FORMAT = "<BBBffff"
 RECV_FRAME_STRUCT = struct.Struct(RECV_FRAME_FORMAT)
 RECV_FRAME_SIZE = RECV_FRAME_STRUCT.size
 
@@ -39,7 +40,9 @@ class JointFeedbackFrame:
     velocity: float
     torque: float
     mos_temperature: float
-    coil_temperature: float
+    # The current UART feedback frame does not carry coil temperature.
+    # Keep a NaN placeholder so downstream storage/visualization stays compatible.
+    coil_temperature: float = float("nan")
 
 
 class TorqueCommandFramePacker:
@@ -47,16 +50,23 @@ class TorqueCommandFramePacker:
 
     def __init__(self) -> None:
         self._frame = bytearray(SEND_FRAME_SIZE)
-        self._checksum_offset = 2 + SEND_PAYLOAD_STRUCT.size
+        self._header_size = len(SEND_FRAME_HEAD)
+        self._payload_offset = self._header_size
+        self._payload_size = SEND_PAYLOAD_STRUCT.size
+        self._checksum_offset = self._header_size + SEND_PAYLOAD_STRUCT.size
 
     def pack(self, torque_command: np.ndarray) -> bytes:
         torques = np.asarray(torque_command, dtype=np.float32).reshape(-1)
         if torques.size != 7:
             raise ValueError("torque_command must contain exactly 7 floats.")
 
-        self._frame[0:2] = SEND_FRAME_HEAD
-        SEND_PAYLOAD_STRUCT.pack_into(self._frame, 2, *[float(value) for value in torques])
-        self._frame[self._checksum_offset] = calculate_xor_checksum(self._frame[: self._checksum_offset])
+        self._frame[0:self._header_size] = SEND_FRAME_HEAD
+        SEND_PAYLOAD_STRUCT.pack_into(self._frame, self._payload_offset, *[float(value) for value in torques])
+        checksum_end = self._payload_offset + self._payload_size
+        # The device-side mode-1 protocol validates XOR over frame head + payload.
+        self._frame[self._checksum_offset] = calculate_xor_checksum(
+            self._frame[0:checksum_end]
+        )
         self._frame[self._checksum_offset + 1 : self._checksum_offset + 3] = SEND_FRAME_TAIL
         return bytes(self._frame)
 
@@ -133,7 +143,6 @@ class SerialFrameReader:
                 velocity=float(parsed[4]),
                 torque=float(parsed[5]),
                 mos_temperature=float(parsed[6]),
-                coil_temperature=float(parsed[7]),
             )
 
 

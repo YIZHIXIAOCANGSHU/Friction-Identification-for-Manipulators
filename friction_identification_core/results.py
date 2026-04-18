@@ -11,7 +11,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from friction_identification_core.config import Config
-from friction_identification_core.models import CollectedData, FrictionIdentificationResult
+from friction_identification_core.models import CollectedData, FrictionIdentificationResult, JointFrictionParameters
 from friction_identification_core.runtime import ensure_directory, log_info, write_json
 
 
@@ -172,7 +172,11 @@ class ResultsManager:
     def begin_run(self, *, mode: str, total_batches: int) -> Path:
         if self.run_dir is not None:
             return self.run_dir
-        if mode == "collect":
+        if mode == "sequential":
+            resumed = self._resume_incomplete_sequential_run(total_batches=total_batches)
+            if resumed is not None:
+                return resumed
+        if mode in {"collect", "sequential"}:
             self._archive_existing_latest_collect_if_needed()
         self.run_mode = str(mode)
         self.run_dir = ensure_directory(self.archive_root / f"{self.run_label}_{mode}")
@@ -199,6 +203,36 @@ class ResultsManager:
         log_info(f"本次运行已归档到: {self.run_dir}")
         return self.run_dir
 
+    def _resume_incomplete_sequential_run(self, *, total_batches: int) -> Path | None:
+        manifest_payloads: list[tuple[Path, dict[str, Any]]] = []
+        for manifest_path in sorted(self.archive_root.glob(f"*_sequential/{RUN_MANIFEST_FILENAME}")):
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if str(payload.get("mode", "")).strip().lower() != "sequential":
+                continue
+            if payload.get("finished_at"):
+                continue
+            if int(payload.get("total_batches", total_batches)) != int(total_batches):
+                continue
+            if payload.get("config_path") and str(payload.get("config_path")) != str(self.config.config_path):
+                continue
+            manifest_payloads.append((manifest_path, payload))
+
+        if not manifest_payloads:
+            return None
+
+        manifest_path, payload = manifest_payloads[-1]
+        self.run_label = str(payload.get("run_label", manifest_path.parent.name.removesuffix("_sequential")))
+        self.run_started_at = str(payload.get("started_at", self.run_started_at))
+        self.run_mode = "sequential"
+        self.run_dir = manifest_path.parent
+        self.manifest_path = manifest_path
+        self._manifest = payload
+        log_info(f"检测到未完成的逐电机运行，继续在原目录断点续跑: {self.run_dir}")
+        return self.run_dir
+
     def capture_batch_path(self, batch_index: int) -> Path:
         return self._require_run_dir() / f"{self.config.output.hardware_capture_prefix}_batch_{batch_index:02d}.npz"
 
@@ -208,17 +242,32 @@ class ResultsManager:
     def compensation_validation_path(self) -> Path:
         return self._require_run_dir() / self.config.output.hardware_compensation_filename
 
+    def sequential_group_dir(self, group_index: int) -> Path:
+        return ensure_directory(self._require_run_dir() / f"group_{int(group_index):02d}")
+
+    def sequential_capture_path(self, *, group_index: int, joint_index: int) -> Path:
+        return self.sequential_group_dir(group_index) / f"joint_{int(joint_index)}_capture.npz"
+
+    def sequential_identification_path(self, *, group_index: int, joint_index: int) -> Path:
+        return self.sequential_group_dir(group_index) / f"joint_{int(joint_index)}_identification.npz"
+
+    def active_summary_dir(self) -> Path:
+        run_dir = self._require_run_dir()
+        if self.run_mode == "sequential":
+            return ensure_directory(run_dir / "summary")
+        return run_dir
+
     def active_summary_path(self) -> Path:
-        return self._require_run_dir() / self.config.output.hardware_summary_filename
+        return self.active_summary_dir() / self.config.output.hardware_summary_filename
 
     def active_report_path(self) -> Path:
-        return self._require_run_dir() / self.config.output.hardware_report_filename
+        return self.active_summary_dir() / self.config.output.hardware_report_filename
 
     def active_summary_csv_path(self) -> Path:
-        return self._require_run_dir() / _summary_csv_filename(self.config)
+        return self.active_summary_dir() / _summary_csv_filename(self.config)
 
     def active_summary_json_path(self) -> Path:
-        return self._require_run_dir() / _summary_readable_json_filename(self.config)
+        return self.active_summary_dir() / _summary_readable_json_filename(self.config)
 
     def latest_collect_manifest_path(self) -> Path:
         return self.results_dir / LATEST_COLLECT_MANIFEST_FILENAME
@@ -235,10 +284,16 @@ class ResultsManager:
         *,
         batch_index: int,
         total_batches: int,
+        group_index: int | None = None,
+        joint_index: int | None = None,
     ) -> ResultPaths:
         self.begin_run(mode=data.mode, total_batches=total_batches)
         if data.mode == "compensate":
             path = self.compensation_validation_path()
+        elif data.mode == "sequential":
+            if group_index is None or joint_index is None:
+                raise ValueError("sequential collection requires group_index and joint_index.")
+            path = self.sequential_capture_path(group_index=group_index, joint_index=joint_index)
         else:
             path = self.capture_batch_path(batch_index)
         payload = self._serialize_collection(data, batch_index=batch_index, total_batches=total_batches)
@@ -262,11 +317,18 @@ class ResultsManager:
         *,
         batch_index: int,
         total_batches: int,
+        group_index: int | None = None,
+        joint_index: int | None = None,
     ) -> ResultPaths | None:
         if result is None:
             return None
         self.begin_run(mode=data.mode, total_batches=total_batches)
-        path = self.identification_batch_path(batch_index)
+        if data.mode == "sequential":
+            if group_index is None or joint_index is None:
+                raise ValueError("sequential identification requires group_index and joint_index.")
+            path = self.sequential_identification_path(group_index=group_index, joint_index=joint_index)
+        else:
+            path = self.identification_batch_path(batch_index)
         payload = self._serialize_identification(
             data,
             result,
@@ -282,7 +344,8 @@ class ResultsManager:
         return ResultPaths(npz_path=path, manifest_path=self.manifest_path, archive_dir=self.run_dir)
 
     def save_summary(self, batches: list[Any]) -> ResultPaths:
-        self.begin_run(mode="collect", total_batches=len(batches))
+        summary_mode = self.run_mode or (str(batches[0].data.mode) if batches else "collect")
+        self.begin_run(mode=summary_mode, total_batches=len(batches))
         timestamp = _now_iso8601()
         identified_batches = [batch for batch in batches if batch.identification is not None]
         joint_count = self.config.joint_count
@@ -451,6 +514,7 @@ class ResultsManager:
             self.latest_collect_manifest_path(),
             {
                 "run_label": self.run_label,
+                "mode": self.run_mode,
                 "archive_dir": str(self.run_dir),
                 "manifest_path": str(self.manifest_path),
                 "summary_npz_path": str(latest_summary_path),
@@ -533,6 +597,134 @@ class ResultsManager:
             batch_valid_sample_ratio=batch_valid_sample_ratio,
             batch_sample_count=batch_sample_count,
         )
+
+    def load_collection_artifact(self, path: Path) -> CollectedData:
+        with np.load(path, allow_pickle=False) as payload:
+            metadata = json.loads(str(payload["metadata"].item())) if "metadata" in payload else {}
+
+            def _optional_array(key: str, *, dtype: Any | None = None) -> np.ndarray | None:
+                if key not in payload:
+                    return None
+                return np.asarray(payload[key], dtype=dtype) if dtype is not None else np.asarray(payload[key])
+
+            return CollectedData(
+                source=str(metadata.get("source", "hardware")),
+                mode=str(metadata.get("mode", "collect")),
+                time=np.asarray(payload["time"], dtype=np.float64),
+                q=np.asarray(payload["q"], dtype=np.float64),
+                qd=np.asarray(payload["qd"], dtype=np.float64),
+                q_cmd=np.asarray(payload["q_cmd"], dtype=np.float64),
+                qd_cmd=np.asarray(payload["qd_cmd"], dtype=np.float64),
+                tau_command=np.asarray(payload["tau_command"], dtype=np.float64),
+                tau_measured=np.asarray(payload["tau_measured"], dtype=np.float64),
+                qdd=_optional_array("qdd", dtype=np.float64),
+                qdd_cmd=_optional_array("qdd_cmd", dtype=np.float64),
+                tau_track_ff=_optional_array("tau_track_ff", dtype=np.float64),
+                tau_track_fb=_optional_array("tau_track_fb", dtype=np.float64),
+                tau_friction_comp=_optional_array("tau_friction_comp", dtype=np.float64),
+                tau_rigid=_optional_array("tau_rigid", dtype=np.float64),
+                tau_residual=_optional_array("tau_residual", dtype=np.float64),
+                tau_friction=_optional_array("tau_friction", dtype=np.float64),
+                clean_mask=_optional_array("clean_mask", dtype=bool),
+                joint_refresh_mask=_optional_array("joint_refresh_mask", dtype=bool),
+                joint_clean_mask=_optional_array("joint_clean_mask", dtype=bool),
+                rotation_state=_optional_array("rotation_state", dtype=np.int8),
+                range_ratio=_optional_array("range_ratio", dtype=np.float64),
+                limit_margin_remaining=_optional_array("limit_margin_remaining", dtype=np.float64),
+                batch_index=_optional_array("batch_index", dtype=np.int64),
+                phase_name=_optional_array("phase_name"),
+                ee_pos=_optional_array("ee_pos", dtype=np.float64),
+                ee_quat=_optional_array("ee_quat", dtype=np.float64),
+                mos_temperature=_optional_array("mos_temperature", dtype=np.float64),
+                coil_temperature=_optional_array("coil_temperature", dtype=np.float64),
+                uart_cycle_hz=_optional_array("uart_cycle_hz", dtype=np.float64),
+                uart_latency_ms=_optional_array("uart_latency_ms", dtype=np.float64),
+                uart_transfer_kbps=_optional_array("uart_transfer_kbps", dtype=np.float64),
+                metadata=metadata,
+            )
+
+    def load_identification_artifact(self, path: Path) -> FrictionIdentificationResult:
+        with np.load(path, allow_pickle=False) as payload:
+            metadata = json.loads(str(payload["metadata"].item())) if "metadata" in payload else {}
+            fit_joint_indices = (
+                np.asarray(payload["fit_joint_indices"], dtype=np.int64)
+                if "fit_joint_indices" in payload
+                else np.arange(np.asarray(payload["coulomb"], dtype=np.float64).size, dtype=np.int64)
+            )
+            all_joint_names = list(metadata.get("joint_names", list(self.config.robot.joint_names)))
+            joint_names = [
+                all_joint_names[int(joint_idx)]
+                for joint_idx in fit_joint_indices
+                if 0 <= int(joint_idx) < len(all_joint_names)
+            ]
+            return FrictionIdentificationResult(
+                joint_names=joint_names,
+                parameters=[
+                    JointFrictionParameters(
+                        coulomb=float(coulomb),
+                        viscous=float(viscous),
+                        offset=float(offset),
+                        velocity_scale=float(velocity_scale),
+                    )
+                    for coulomb, viscous, offset, velocity_scale in zip(
+                        np.asarray(payload["coulomb"], dtype=np.float64),
+                        np.asarray(payload["viscous"], dtype=np.float64),
+                        np.asarray(payload["offset"], dtype=np.float64),
+                        np.asarray(payload["velocity_scale"], dtype=np.float64),
+                    )
+                ],
+                predicted_torque=np.asarray(payload["predicted_torque"], dtype=np.float64),
+                measured_torque=np.asarray(payload["measured_torque_fit"], dtype=np.float64),
+                train_mask=np.asarray(payload["train_mask"], dtype=bool),
+                validation_mask=np.asarray(payload["validation_mask"], dtype=bool),
+                train_rmse=np.asarray(payload["train_rmse"], dtype=np.float64),
+                validation_rmse=np.asarray(payload["validation_rmse"], dtype=np.float64),
+                train_r2=np.asarray(payload["train_r2"], dtype=np.float64),
+                validation_r2=np.asarray(payload["validation_r2"], dtype=np.float64),
+            )
+
+    def load_existing_sequential_runs(self) -> list[dict[str, Any]]:
+        if self.run_mode != "sequential" or self.run_dir is None:
+            return []
+
+        runs: list[dict[str, Any]] = []
+        for capture_path in sorted(self.run_dir.glob("group_*/joint_*_capture.npz")):
+            try:
+                data = self.load_collection_artifact(capture_path)
+            except Exception:
+                continue
+
+            termination_reason = str(data.metadata.get("termination_reason", "completed")).strip().lower()
+            if termination_reason in {"interrupted", "error"}:
+                continue
+
+            group_index = int(data.metadata.get("group_index", 1))
+            joint_index = int(data.metadata.get("target_joint_index", data.metadata.get("joint_index", -1)))
+            batch_index = int(data.metadata.get("batch_index", 0))
+            identification_path = self.sequential_identification_path(
+                group_index=group_index,
+                joint_index=joint_index,
+            )
+            identification = None
+            if identification_path.exists():
+                try:
+                    identification = self.load_identification_artifact(identification_path)
+                except Exception:
+                    identification = None
+
+            runs.append(
+                {
+                    "group_index": group_index,
+                    "joint_index": joint_index,
+                    "batch_index": batch_index,
+                    "data": data,
+                    "identification": identification,
+                    "collection_path": capture_path,
+                    "identification_path": identification_path if identification_path.exists() else None,
+                }
+            )
+
+        return sorted(runs, key=lambda item: (int(item["batch_index"]), int(item["joint_index"])))
 
     def compare_archived_runs(
         self,
@@ -849,15 +1041,17 @@ class ResultsManager:
         best_r2_joint = max(active_rows, key=lambda item: item["validation_r2"], default=None)
         worst_rmse_joint = max(active_rows, key=lambda item: item["validation_rmse"], default=None)
         lowest_valid_joint = min(active_rows, key=lambda item: item["valid_sample_ratio"], default=None)
+        mode_label = "Sequential" if self.run_mode == "sequential" else "Parallel"
+        run_unit_label = "Joint Runs" if self.run_mode == "sequential" else "Batches"
         lines = [
-            "# Hardware Parallel Friction Identification Report",
+            f"# Hardware {mode_label} Friction Identification Report",
             "",
             "## Run Overview",
             "",
             f"- Run Label: `{self.run_label}`",
             f"- Mode: `{self.run_mode}`",
             f"- Timestamp: `{timestamp}`",
-            f"- Batches: `{batch_count}`",
+            f"- {run_unit_label}: `{batch_count}`",
             f"- Active Joints: `{list(self.config.identification.active_joints)}`",
             f"- Archive Dir: `{self.run_dir}`",
             "",

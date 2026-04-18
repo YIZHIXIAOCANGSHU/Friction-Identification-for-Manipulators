@@ -12,18 +12,54 @@ def _default_config_argument() -> str:
     return str(DEFAULT_CONFIG_PATH.relative_to(DEFAULT_CONFIG_PATH.parents[1]))
 
 
-def _apply_overrides(config: Config, *, output: str | None) -> Config:
+def _parse_joint_override(raw: str | None, joint_count: int) -> tuple[int, ...] | None:
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    if not text:
+        return None
+    if text == "all":
+        return tuple(range(joint_count))
+
+    joints: list[int] = []
+    seen: set[int] = set()
+    for token in str(raw).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        joint_idx = int(token)
+        if not 0 <= joint_idx < joint_count:
+            raise ValueError(f"joint index {joint_idx} is outside [0, {joint_count - 1}].")
+        if joint_idx in seen:
+            continue
+        joints.append(joint_idx)
+        seen.add(joint_idx)
+    if not joints:
+        raise ValueError("--joints 未解析出任何有效关节索引。")
+    return tuple(joints)
+
+
+def _apply_overrides(config: Config, *, output: str | None, joints: str | None) -> Config:
     if not output:
-        return config
-    output_path = config.resolve_project_path(output)
+        updated = config
+    else:
+        output_path = config.resolve_project_path(output)
+        updated = replace(
+            config,
+            output=replace(config.output, results_dir=Path(output_path).resolve()),
+        )
+
+    joint_override = _parse_joint_override(joints, updated.joint_count)
+    if joint_override is None:
+        return updated
     return replace(
-        config,
-        output=replace(config.output, results_dir=Path(output_path).resolve()),
+        updated,
+        identification=replace(updated.identification, active_joints=joint_override),
     )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Hardware-only parallel friction-identification CLI.")
+    parser = argparse.ArgumentParser(description="Hardware friction-identification CLI.")
     parser.add_argument(
         "--config",
         default=_default_config_argument(),
@@ -31,14 +67,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("collect", "compensate", "compare"),
-        default="collect",
-        help="Run parallel collection/identification, compensation validation, or cross-run comparison.",
+        choices=("collect", "sequential", "compensate", "compare"),
+        default="sequential",
+        help="sequential: 逐电机辨识, collect: 并行辨识, compensate: 补偿验证, compare: 历史结果对比。",
     )
     parser.add_argument(
         "--output",
         default=None,
         help="Optional output directory override.",
+    )
+    parser.add_argument(
+        "--joints",
+        default=None,
+        help="Specify active joints, for example '0,2,4' or 'all'.",
     )
     parser.add_argument(
         "--compare-limit",
@@ -60,7 +101,7 @@ def main(argv: list[str] | None = None) -> None:
         args = parser.parse_args(argv)
 
         config = load_config(args.config)
-        config = _apply_overrides(config, output=args.output)
+        config = _apply_overrides(config, output=args.output, joints=args.joints)
 
         if args.mode == "compare":
             from friction_identification_core.results import compare_saved_runs
@@ -78,6 +119,8 @@ def main(argv: list[str] | None = None) -> None:
         from friction_identification_core.pipeline import run_hardware
 
         run_hardware(config, mode=args.mode)
+    except ValueError as exc:
+        raise SystemExit(f"[ERROR] {exc}") from exc
     except KeyboardInterrupt:
         log_info("已收到 Ctrl+C，中止当前运行。")
         raise SystemExit(130) from None

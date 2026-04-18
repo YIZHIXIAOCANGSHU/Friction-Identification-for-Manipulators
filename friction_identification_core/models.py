@@ -167,7 +167,7 @@ class DataSource(Protocol):
     source_name: str
     inverse_dynamics_backend: "InverseDynamicsBackend"
 
-    def build_reference(self) -> "ReferenceTrajectory | None":
+    def build_reference(self, *, joint_index: int | None = None) -> "ReferenceTrajectory | None":
         ...
 
     def supports_identification(self, mode: str) -> bool:
@@ -182,10 +182,20 @@ class DataSource(Protocol):
         safety: "SafetyGuard",
         batch_index: int = 1,
         total_batches: int = 1,
+        target_joint_index: int | None = None,
+        group_index: int = 1,
+        total_groups: int = 1,
     ) -> CollectedData:
         ...
 
     def prepare_identification(self, data: CollectedData) -> IdentificationInputs | None:
+        ...
+
+    def publish_identification_result(
+        self,
+        data: CollectedData,
+        result: FrictionIdentificationResult,
+    ) -> None:
         ...
 
     def finalize(

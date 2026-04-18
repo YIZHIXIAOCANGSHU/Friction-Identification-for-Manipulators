@@ -446,6 +446,59 @@ def build_excitation_start_pose(
     return start_q
 
 
+def generate_single_joint_excitation(
+    *,
+    joint_index: int,
+    home_qpos: np.ndarray,
+    joint_limits: np.ndarray,
+    torque_limits: np.ndarray,
+    safety_margin: float,
+    duration: float,
+    sample_rate: float,
+    sweep_cycles: int,
+    window_mode: str = "unbounded",
+    speed_schedule: np.ndarray | None = None,
+    phase_offsets: np.ndarray | None = None,
+    harmonic_weights: np.ndarray | None = None,
+    reversal_pause_s: float = 0.15,
+    zero_crossing_dither_s: float = 0.30,
+) -> ReferenceTrajectory:
+    home_qpos = np.asarray(home_qpos, dtype=np.float64).reshape(-1)
+    joint_count = int(home_qpos.size)
+    if not 0 <= int(joint_index) < joint_count:
+        raise ValueError(f"joint_index must be within [0, {joint_count - 1}].")
+
+    if speed_schedule is None:
+        speed_schedule = np.asarray([0.15, 0.35, 0.70, 1.0], dtype=np.float64)
+    if harmonic_weights is None:
+        harmonic_weights = np.asarray([1.0, 0.35, 0.12], dtype=np.float64)
+    if phase_offsets is None:
+        phase_offsets = np.zeros(joint_count, dtype=np.float64)
+    else:
+        phase_offsets = np.asarray(phase_offsets, dtype=np.float64).reshape(-1)
+        if phase_offsets.size != joint_count:
+            raise ValueError("phase_offsets size must match the number of joints.")
+        phase_offsets = phase_offsets.copy()
+    phase_offsets[int(joint_index)] = 0.0
+
+    return generate_parallel_full_range_excitation(
+        home_qpos=home_qpos,
+        joint_limits=joint_limits,
+        torque_limits=torque_limits,
+        safety_margin=safety_margin,
+        window_mode=window_mode,
+        duration=duration,
+        sample_rate=sample_rate,
+        sweep_cycles=sweep_cycles,
+        speed_schedule=np.asarray(speed_schedule, dtype=np.float64),
+        phase_offsets=phase_offsets,
+        harmonic_weights=np.asarray(harmonic_weights, dtype=np.float64),
+        reversal_pause_s=reversal_pause_s,
+        zero_crossing_dither_s=zero_crossing_dither_s,
+        active_joints=np.asarray([int(joint_index)], dtype=np.int64),
+    )
+
+
 def generate_parallel_full_range_excitation(
     *,
     home_qpos: np.ndarray,
@@ -664,14 +717,45 @@ def sample_reference_trajectory(
     )
 
 
-def build_excitation_trajectory(config: Config) -> ReferenceTrajectory:
+def build_excitation_trajectory(
+    config: Config,
+    *,
+    joint_index: int | None = None,
+    duration: float | None = None,
+) -> ReferenceTrajectory:
+    excitation_duration = (
+        float(duration)
+        if duration is not None
+        else (
+            float(config.identification.sequential.joint_duration)
+            if joint_index is not None
+            else float(config.identification.excitation.duration)
+        )
+    )
+    if joint_index is not None:
+        return generate_single_joint_excitation(
+            joint_index=int(joint_index),
+            home_qpos=config.robot.home_qpos,
+            joint_limits=config.robot.joint_limits,
+            torque_limits=config.robot.torque_limits,
+            safety_margin=config.safety.joint_limit_margin,
+            window_mode=config.identification.excitation.window_mode,
+            duration=excitation_duration,
+            sample_rate=config.sampling.rate,
+            sweep_cycles=config.identification.excitation.sweep_cycles,
+            speed_schedule=config.identification.excitation.speed_schedule,
+            phase_offsets=config.identification.excitation.phase_offsets,
+            harmonic_weights=config.identification.excitation.harmonic_weights,
+            reversal_pause_s=config.identification.excitation.reversal_pause_s,
+            zero_crossing_dither_s=config.identification.excitation.zero_crossing_dither_s,
+        )
     return generate_parallel_full_range_excitation(
         home_qpos=config.robot.home_qpos,
         joint_limits=config.robot.joint_limits,
         torque_limits=config.robot.torque_limits,
         safety_margin=config.safety.joint_limit_margin,
         window_mode=config.identification.excitation.window_mode,
-        duration=config.identification.excitation.duration,
+        duration=excitation_duration,
         sample_rate=config.sampling.rate,
         sweep_cycles=config.identification.excitation.sweep_cycles,
         speed_schedule=config.identification.excitation.speed_schedule,
@@ -696,6 +780,7 @@ __all__ = [
     "build_quintic_point_to_point_trajectory",
     "build_startup_pose",
     "generate_parallel_full_range_excitation",
+    "generate_single_joint_excitation",
     "resolve_active_joint_mask",
     "resolve_joint_window",
     "resolve_joint_limit_arrays",
