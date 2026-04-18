@@ -1,0 +1,52 @@
+motors:
+  ids: [1, 2, 3, 4, 5, 6, 7]
+  names:
+    - "motor_01"
+    - "motor_02"
+    - "motor_03"
+    - "motor_04"
+    - "motor_05"
+    - "motor_06"
+    - "motor_07"
+  enabled: [1, 2, 3, 4, 5, 6, 7]
+
+serial:
+  port: "/dev/ttyUSB0"
+  baudrate: 115200
+  read_timeout: 0.02
+  write_timeout: 0.02
+  read_chunk_size: 256
+  flush_input_before_round: true
+
+excitation:
+  sample_rate: 200.0
+  duration: 18.0
+  amplitude: 0.5
+  frequency_bands: [0.15, 0.35, 0.70]
+  hold_start: 1.5
+  hold_end: 1.5
+
+control:
+  kp: [25.0, 25.0, 18.0, 18.0, 12.0, 12.0, 10.0]
+  kd: [1.5, 1.5, 1.0, 1.0, 0.8, 0.8, 0.8]
+  output_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+identification:
+  group_count: 1
+  regularization: 1.0e-6
+  huber_delta: 1.5
+  max_iterations: 12
+  min_samples: 200
+  zero_velocity_threshold: 0.01
+  min_motion_span: 0.05
+  validation_stride: 5
+  validation_warmup_samples: 20
+  savgol_window: 31
+  savgol_polyorder: 3
+  velocity_scale_candidates: [0.01, 0.02, 0.05]
+
+output:
+  results_dir: "results"
+  summary_filename: "hardware_identification_summary.npz"
+  summary_csv_filename: "hardware_identification_summary.csv"
+  summary_report_filename: "hardware_identification_report.md"
