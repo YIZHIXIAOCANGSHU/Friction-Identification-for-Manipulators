@@ -47,6 +47,7 @@ class RoundCapture:
     position: np.ndarray
     velocity: np.ndarray
     torque_feedback: np.ndarray
+    command_raw: np.ndarray
     command: np.ndarray
     position_cmd: np.ndarray
     velocity_cmd: np.ndarray

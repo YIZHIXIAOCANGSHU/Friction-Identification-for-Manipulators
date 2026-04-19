@@ -31,6 +31,7 @@ class SummaryPaths:
     root_summary_csv_path: Path
     root_summary_report_path: Path
     manifest_path: Path
+    rerun_recording_path: Path
 
 
 def _normalize_json_value(value: Any) -> Any:
@@ -78,6 +79,7 @@ class ResultStore:
         self.run_label = f"{filesystem_timestamp()}_sequential"
         self.run_dir = ensure_directory(self.results_dir / "runs" / self.run_label)
         self.summary_dir = ensure_directory(self.run_dir / "summary")
+        self.rerun_recording_path = self.run_dir / "sequential_identification.rrd"
         self.manifest_path = self.run_dir / "run_manifest.json"
         self._manifest: dict[str, Any] = {
             "run_label": self.run_label,
@@ -89,6 +91,7 @@ class ResultStore:
             "capture_files": [],
             "identification_files": [],
             "summary_files": {},
+            "rerun_recording_path": str(self.rerun_recording_path),
             "config_path": str(config.config_path),
         }
         self._write_manifest()
@@ -108,6 +111,7 @@ class ResultStore:
             position=np.asarray(capture.position, dtype=np.float64),
             velocity=np.asarray(capture.velocity, dtype=np.float64),
             torque_feedback=np.asarray(capture.torque_feedback, dtype=np.float64),
+            command_raw=np.asarray(capture.command_raw, dtype=np.float64),
             command=np.asarray(capture.command, dtype=np.float64),
             position_cmd=np.asarray(capture.position_cmd, dtype=np.float64),
             velocity_cmd=np.asarray(capture.velocity_cmd, dtype=np.float64),
@@ -262,6 +266,7 @@ class ResultStore:
             root_summary_csv_path=root_summary_csv_path,
             root_summary_report_path=root_summary_report_path,
             manifest_path=self.manifest_path,
+            rerun_recording_path=self.rerun_recording_path,
         )
 
     def _write_summary_csv(self, path: Path, payload: dict[str, Any]) -> None:

@@ -126,17 +126,31 @@ class MotorSequenceChecker:
 
 
 class SingleMotorCommandAdapter:
-    def __init__(self, *, motor_count: int = 7) -> None:
+    def __init__(self, *, motor_count: int = 7, torque_limits: np.ndarray | None = None) -> None:
         if int(motor_count) != 7:
             raise ValueError("The current UART adapter expects exactly 7 motor slots.")
         self._motor_count = int(motor_count)
+        if torque_limits is None:
+            limits = np.full(self._motor_count, np.inf, dtype=np.float64)
+        else:
+            limits = np.asarray(torque_limits, dtype=np.float64).reshape(-1)
+            if limits.size != self._motor_count:
+                raise ValueError(f"torque_limits must contain exactly {self._motor_count} values.")
+        self._torque_limits = limits.astype(np.float64, copy=True)
+
+    def limit_command(self, motor_id: int, command: float) -> float:
+        motor_id = int(motor_id)
+        if not 1 <= motor_id <= self._motor_count:
+            raise ValueError(f"motor_id must be within [1, {self._motor_count}].")
+        torque_limit = float(self._torque_limits[motor_id - 1])
+        return float(np.clip(float(command), -torque_limit, torque_limit))
 
     def pack(self, motor_id: int, command: float) -> bytes:
         motor_id = int(motor_id)
         if not 1 <= motor_id <= self._motor_count:
             raise ValueError(f"motor_id must be within [1, {self._motor_count}].")
         payload = np.zeros(self._motor_count, dtype=np.float32)
-        payload[motor_id - 1] = np.float32(command)
+        payload[motor_id - 1] = np.float32(self.limit_command(motor_id, command))
         payload_bytes = COMMAND_PAYLOAD_STRUCT.pack(*[float(value) for value in payload])
         checksum = calculate_xor_checksum(COMMAND_FRAME_HEAD + payload_bytes)
         return COMMAND_FRAME_HEAD + payload_bytes + bytes((checksum,)) + COMMAND_FRAME_TAIL

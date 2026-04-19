@@ -10,6 +10,7 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("default.yaml")
+DEFAULT_TORQUE_LIMITS = np.array([40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0], dtype=np.float64)
 
 
 def _as_int_tuple(values: Any) -> tuple[int, ...]:
@@ -65,17 +66,14 @@ class SerialConfig:
 class ExcitationConfig:
     sample_rate: float
     duration: float
-    amplitude: float
-    frequency_bands: tuple[float, ...]
     hold_start: float
     hold_end: float
 
 
 @dataclass(frozen=True)
 class ControlConfig:
-    kp: np.ndarray
-    kd: np.ndarray
-    output_scale: np.ndarray
+    max_velocity: np.ndarray
+    max_torque: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -183,24 +181,28 @@ def _parse_serial(raw: dict[str, Any]) -> SerialConfig:
 
 
 def _parse_excitation(raw: dict[str, Any]) -> ExcitationConfig:
-    frequency_bands = tuple(float(item) for item in raw.get("frequency_bands", (0.15, 0.35, 0.7)))
-    if not frequency_bands:
-        raise ValueError("excitation.frequency_bands must not be empty.")
     return ExcitationConfig(
         sample_rate=float(raw.get("sample_rate", 200.0)),
         duration=float(raw.get("duration", 18.0)),
-        amplitude=float(raw.get("amplitude", 0.5)),
-        frequency_bands=frequency_bands,
         hold_start=float(raw.get("hold_start", 1.5)),
         hold_end=float(raw.get("hold_end", 1.5)),
     )
 
 
 def _parse_control(raw: dict[str, Any], motor_count: int) -> ControlConfig:
+    max_velocity = _expand_float_vector(raw.get("max_velocity", 0.5), motor_count, name="control.max_velocity")
+    if np.any(max_velocity <= 0.0):
+        raise ValueError("control.max_velocity must all be > 0.")
+    max_torque = _expand_float_vector(
+        raw.get("max_torque", raw.get("torque_limits", DEFAULT_TORQUE_LIMITS)),
+        motor_count,
+        name="control.max_torque",
+    )
+    if np.any(max_torque <= 0.0):
+        raise ValueError("control.max_torque must all be > 0.")
     return ControlConfig(
-        kp=_expand_float_vector(raw.get("kp", 20.0), motor_count, name="control.kp"),
-        kd=_expand_float_vector(raw.get("kd", 1.0), motor_count, name="control.kd"),
-        output_scale=_expand_float_vector(raw.get("output_scale", 1.0), motor_count, name="control.output_scale"),
+        max_velocity=max_velocity,
+        max_torque=max_torque,
     )
 
 
@@ -257,10 +259,6 @@ def load_config(path: str | Path) -> Config:
         raise ValueError("excitation.sample_rate must be > 0.")
     if config.excitation.duration <= 0.0:
         raise ValueError("excitation.duration must be > 0.")
-    if config.excitation.amplitude <= 0.0:
-        raise ValueError("excitation.amplitude must be > 0.")
-    if any(freq <= 0.0 for freq in config.excitation.frequency_bands):
-        raise ValueError("excitation.frequency_bands must all be > 0.")
     return config
 
 

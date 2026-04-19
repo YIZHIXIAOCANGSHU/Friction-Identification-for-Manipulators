@@ -15,6 +15,7 @@ from friction_identification_core.runtime import log_info, utc_now_iso8601
 from friction_identification_core.serial_protocol import MotorSequenceChecker, SerialFrameParser, SingleMotorCommandAdapter
 from friction_identification_core.trajectory import build_reference_trajectory
 from friction_identification_core.transport import SerialTransport, open_serial_transport
+from friction_identification_core.visualization import RerunRecorder
 
 
 @dataclass(frozen=True)
@@ -34,9 +35,14 @@ def _capture_round(
     target_motor_id: int,
     group_index: int,
     round_index: int,
+    rerun_recorder: RerunRecorder,
 ) -> tuple[RoundCapture, bool]:
-    reference = build_reference_trajectory(config.excitation)
     motor_name = config.motors.name_for(target_motor_id)
+    target_index = config.motor_index(target_motor_id)
+    reference = build_reference_trajectory(
+        config.excitation,
+        max_velocity=float(config.control.max_velocity[target_index]),
+    )
 
     if config.serial.flush_input_before_round:
         transport.reset_input_buffer()
@@ -47,6 +53,7 @@ def _capture_round(
     position_log: list[float] = []
     velocity_log: list[float] = []
     torque_log: list[float] = []
+    command_raw_log: list[float] = []
     command_log: list[float] = []
     position_cmd_log: list[float] = []
     velocity_cmd_log: list[float] = []
@@ -82,7 +89,8 @@ def _capture_round(
                     continue
 
                 reference_sample = reference.sample(elapsed_s)
-                command = controller.update(target_motor_id, reference_sample, frame)
+                command_raw, command_limited = controller.update(target_motor_id, reference_sample, frame)
+                command = command_adapter.limit_command(target_motor_id, command_limited)
                 transport.write(command_adapter.pack(target_motor_id, command))
 
                 time_log.append(float(elapsed_s))
@@ -90,6 +98,7 @@ def _capture_round(
                 position_log.append(float(frame.position))
                 velocity_log.append(float(frame.velocity))
                 torque_log.append(float(frame.torque))
+                command_raw_log.append(float(command_raw))
                 command_log.append(float(command))
                 position_cmd_log.append(float(reference_sample.position_cmd))
                 velocity_cmd_log.append(float(reference_sample.velocity_cmd))
@@ -98,6 +107,22 @@ def _capture_round(
                 state_log.append(int(frame.state))
                 mos_temperature_log.append(float(frame.mos_temperature))
                 id_match_log.append(True)
+                rerun_recorder.log_live_sample(
+                    group_index=int(group_index),
+                    round_index=int(round_index),
+                    motor_id=int(frame.motor_id),
+                    motor_name=motor_name,
+                    sample_index=len(time_log) - 1,
+                    elapsed_s=float(elapsed_s),
+                    position=float(frame.position),
+                    position_cmd=float(reference_sample.position_cmd),
+                    velocity=float(frame.velocity),
+                    velocity_cmd=float(reference_sample.velocity_cmd),
+                    command_raw=float(command_raw),
+                    command=float(command),
+                    torque_feedback=float(frame.torque),
+                    phase_name=str(reference_sample.phase_name),
+                )
 
             if not saw_frame and not chunk:
                 time.sleep(max(float(config.serial.read_timeout), 1.0e-3))
@@ -126,6 +151,7 @@ def _capture_round(
         position=np.asarray(position_log, dtype=np.float64),
         velocity=np.asarray(velocity_log, dtype=np.float64),
         torque_feedback=np.asarray(torque_log, dtype=np.float64),
+        command_raw=np.asarray(command_raw_log, dtype=np.float64),
         command=np.asarray(command_log, dtype=np.float64),
         position_cmd=np.asarray(position_cmd_log, dtype=np.float64),
         velocity_cmd=np.asarray(velocity_cmd_log, dtype=np.float64),
@@ -147,8 +173,12 @@ def run_sequential_identification(
     store = ResultStore(config)
     parser = SerialFrameParser(max_motor_id=max(config.motor_ids))
     sequence_checker = MotorSequenceChecker(config.motor_ids)
-    command_adapter = SingleMotorCommandAdapter(motor_count=max(config.motor_ids))
+    command_adapter = SingleMotorCommandAdapter(
+        motor_count=max(config.motor_ids),
+        torque_limits=config.control.max_torque,
+    )
     controller = SingleMotorController(config)
+    rerun_recorder = RerunRecorder(store.rerun_recording_path)
     artifacts: list[RoundArtifact] = []
 
     transport = transport_factory() if transport_factory is not None else open_serial_transport(config.serial)
@@ -174,10 +204,12 @@ def run_sequential_identification(
                     target_motor_id=int(target_motor_id),
                     group_index=int(group_index),
                     round_index=int(current_round),
+                    rerun_recorder=rerun_recorder,
                 )
                 identification = identify_motor_friction(config.identification, capture)
                 capture_path = store.save_capture(capture)
                 identification_path = store.save_identification(capture, identification)
+                rerun_recorder.log_identification(capture, identification)
                 artifacts.append(
                     RoundArtifact(
                         capture=capture,
@@ -192,6 +224,11 @@ def run_sequential_identification(
             if stop_requested:
                 break
         summary_paths = store.save_summary(artifacts)
+        rerun_recorder.log_summary(
+            summary_path=summary_paths.run_summary_path,
+            report_path=summary_paths.run_summary_report_path,
+        )
         return SequentialRunResult(artifacts=tuple(artifacts), summary_paths=summary_paths)
     finally:
+        rerun_recorder.close()
         transport.close()
