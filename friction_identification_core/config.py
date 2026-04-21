@@ -30,6 +30,15 @@ def _expand_float_vector(values: Any, size: int, *, name: str) -> np.ndarray:
     return array.astype(np.float64, copy=True)
 
 
+def _required_float(raw: dict[str, Any], key: str, *, name: str) -> float:
+    if key not in raw:
+        raise ValueError(f"{name} is required.")
+    try:
+        return float(raw[key])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number.") from exc
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as handle:
         payload = yaml.safe_load(handle) or {}
@@ -60,14 +69,40 @@ class SerialConfig:
     write_timeout: float
     read_chunk_size: int
     flush_input_before_round: bool
+    sync_timeout: float
+    sync_cycles_required: int
+
+
+@dataclass(frozen=True)
+class ExcitationPlatformConfig:
+    speed: float | None
+    speed_ratio: float | None
+    settle_duration: float
+    steady_duration: float
+
+    def resolve_speed(self, *, max_velocity: float) -> float:
+        if self.speed_ratio is not None:
+            speed = float(self.speed_ratio) * float(max_velocity)
+        elif self.speed is not None:
+            speed = float(self.speed)
+        else:  # pragma: no cover - guarded by config validation
+            raise ValueError("Excitation platform must define either speed or speed_ratio.")
+
+        speed_limit = 0.90 * float(max_velocity)
+        if speed > speed_limit + 1.0e-12:
+            raise ValueError(
+                f"Excitation platform speed {speed:.6f} exceeds 0.90 * max_velocity ({speed_limit:.6f})."
+            )
+        return speed
 
 
 @dataclass(frozen=True)
 class ExcitationConfig:
     sample_rate: float
-    duration: float
     hold_start: float
     hold_end: float
+    transition_duration: float
+    platforms: tuple[ExcitationPlatformConfig, ...]
 
 
 @dataclass(frozen=True)
@@ -83,8 +118,12 @@ class IdentificationConfig:
     huber_delta: float
     max_iterations: int
     min_samples: int
+    min_samples_per_platform: int
+    min_direction_samples: int
     zero_velocity_threshold: float
     min_motion_span: float
+    min_target_frame_ratio: float
+    max_sequence_error_ratio: float
     validation_stride: int
     validation_warmup_samples: int
     savgol_window: int
@@ -177,15 +216,61 @@ def _parse_serial(raw: dict[str, Any]) -> SerialConfig:
         write_timeout=float(raw.get("write_timeout", 0.02)),
         read_chunk_size=max(int(raw.get("read_chunk_size", 256)), 19),
         flush_input_before_round=bool(raw.get("flush_input_before_round", True)),
+        sync_timeout=max(float(raw.get("sync_timeout", 2.0)), 0.1),
+        sync_cycles_required=max(int(raw.get("sync_cycles_required", 3)), 1),
     )
 
 
 def _parse_excitation(raw: dict[str, Any]) -> ExcitationConfig:
+    platforms_raw = raw.get("platforms")
+    if not isinstance(platforms_raw, list) or not platforms_raw:
+        raise ValueError("excitation.platforms must not be empty.")
+
+    platforms: list[ExcitationPlatformConfig] = []
+    for index, platform_raw in enumerate(platforms_raw, start=1):
+        if not isinstance(platform_raw, dict):
+            raise ValueError(f"excitation.platforms[{index}] must be a mapping.")
+        has_speed = "speed" in platform_raw
+        has_speed_ratio = "speed_ratio" in platform_raw
+        if has_speed == has_speed_ratio:
+            raise ValueError(
+                f"excitation.platforms[{index}] must provide exactly one of speed or speed_ratio."
+            )
+        platforms.append(
+            ExcitationPlatformConfig(
+                speed=(
+                    _required_float(platform_raw, "speed", name=f"excitation.platforms[{index}].speed")
+                    if has_speed
+                    else None
+                ),
+                speed_ratio=(
+                    _required_float(
+                        platform_raw,
+                        "speed_ratio",
+                        name=f"excitation.platforms[{index}].speed_ratio",
+                    )
+                    if has_speed_ratio
+                    else None
+                ),
+                settle_duration=_required_float(
+                    platform_raw,
+                    "settle_duration",
+                    name=f"excitation.platforms[{index}].settle_duration",
+                ),
+                steady_duration=_required_float(
+                    platform_raw,
+                    "steady_duration",
+                    name=f"excitation.platforms[{index}].steady_duration",
+                ),
+            )
+        )
+
     return ExcitationConfig(
         sample_rate=float(raw.get("sample_rate", 200.0)),
-        duration=float(raw.get("duration", 18.0)),
         hold_start=float(raw.get("hold_start", 1.5)),
         hold_end=float(raw.get("hold_end", 1.5)),
+        transition_duration=float(raw.get("transition_duration", 0.4)),
+        platforms=tuple(platforms),
     )
 
 
@@ -216,8 +301,12 @@ def _parse_identification(raw: dict[str, Any]) -> IdentificationConfig:
         huber_delta=float(raw.get("huber_delta", 1.5)),
         max_iterations=max(int(raw.get("max_iterations", 12)), 1),
         min_samples=max(int(raw.get("min_samples", 200)), 1),
-        zero_velocity_threshold=max(float(raw.get("zero_velocity_threshold", 0.01)), 0.0),
+        min_samples_per_platform=max(int(raw.get("min_samples_per_platform", 120)), 1),
+        min_direction_samples=max(int(raw.get("min_direction_samples", 300)), 1),
+        zero_velocity_threshold=max(float(raw.get("zero_velocity_threshold", 0.015)), 0.0),
         min_motion_span=max(float(raw.get("min_motion_span", 0.05)), 0.0),
+        min_target_frame_ratio=float(np.clip(raw.get("min_target_frame_ratio", 0.7), 0.0, 1.0)),
+        max_sequence_error_ratio=max(float(raw.get("max_sequence_error_ratio", 0.2)), 0.0),
         validation_stride=max(int(raw.get("validation_stride", 5)), 1),
         validation_warmup_samples=max(int(raw.get("validation_warmup_samples", 20)), 0),
         savgol_window=max(int(raw.get("savgol_window", 31)), 3),
@@ -257,8 +346,25 @@ def load_config(path: str | Path) -> Config:
 
     if config.excitation.sample_rate <= 0.0:
         raise ValueError("excitation.sample_rate must be > 0.")
-    if config.excitation.duration <= 0.0:
-        raise ValueError("excitation.duration must be > 0.")
+    if config.excitation.hold_start < 0.0:
+        raise ValueError("excitation.hold_start must be >= 0.")
+    if config.excitation.hold_end < 0.0:
+        raise ValueError("excitation.hold_end must be >= 0.")
+    if config.excitation.transition_duration < 0.0:
+        raise ValueError("excitation.transition_duration must be >= 0.")
+    if not config.excitation.platforms:
+        raise ValueError("excitation.platforms must not be empty.")
+    for index, platform in enumerate(config.excitation.platforms, start=1):
+        if (platform.speed is None) == (platform.speed_ratio is None):
+            raise ValueError(f"excitation.platforms[{index}] must define exactly one of speed or speed_ratio.")
+        if platform.speed is not None and platform.speed <= 0.0:
+            raise ValueError(f"excitation.platforms[{index}].speed must be > 0.")
+        if platform.speed_ratio is not None and not (0.0 < platform.speed_ratio <= 0.90):
+            raise ValueError(f"excitation.platforms[{index}].speed_ratio must be within (0, 0.90].")
+        if platform.settle_duration <= 0.0:
+            raise ValueError(f"excitation.platforms[{index}].settle_duration must be > 0.")
+        if platform.steady_duration <= 0.0:
+            raise ValueError(f"excitation.platforms[{index}].steady_duration must be > 0.")
     return config
 
 

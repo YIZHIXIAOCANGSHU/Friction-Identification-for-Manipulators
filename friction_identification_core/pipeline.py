@@ -39,9 +39,11 @@ def _capture_round(
 ) -> tuple[RoundCapture, bool]:
     motor_name = config.motors.name_for(target_motor_id)
     target_index = config.motor_index(target_motor_id)
+    target_max_velocity = float(config.control.max_velocity[target_index])
+    target_max_torque = float(config.control.max_torque[target_index])
     reference = build_reference_trajectory(
         config.excitation,
-        max_velocity=float(config.control.max_velocity[target_index]),
+        max_velocity=target_max_velocity,
     )
 
     if config.serial.flush_input_before_round:
@@ -63,14 +65,26 @@ def _capture_round(
     mos_temperature_log: list[float] = []
     id_match_log: list[bool] = []
     sequence_error_count = 0
+    observed_frame_count = 0
+    target_frame_count = 0
+    target_frame_goal = max(int(reference.time.size), 1)
+    sync_required_frames = max(len(config.enabled_motor_ids) * int(config.serial.sync_cycles_required), 1)
+    synced_before_capture = False
+    sync_wait_duration_s = 0.0
     interrupted = False
-    started_at = utc_now_iso8601()
-    start_monotonic = time.monotonic()
+    capture_started_at: str | None = None
+    round_started_at = utc_now_iso8601()
+    sync_started_monotonic = time.monotonic()
+    capture_started_monotonic: float | None = None
+    consecutive_sync_frames = 0
 
     try:
         while True:
-            elapsed_s = time.monotonic() - start_monotonic
-            if elapsed_s >= reference.duration_s:
+            now = time.monotonic()
+            if synced_before_capture and capture_started_monotonic is not None:
+                if (now - capture_started_monotonic) >= reference.duration_s:
+                    break
+            elif (now - sync_started_monotonic) >= float(config.serial.sync_timeout):
                 break
 
             chunk = transport.read(config.serial.read_chunk_size)
@@ -78,51 +92,107 @@ def _capture_round(
                 parser.feed(chunk)
 
             saw_frame = False
+            capture_complete = False
             while True:
                 frame = parser.pop_frame()
                 if frame is None:
                     break
                 saw_frame = True
-                if not sequence_checker.observe(frame.motor_id):
+                observed_frame_count += 1
+                sequence_ok = sequence_checker.observe(frame.motor_id)
+                if not sequence_ok:
                     sequence_error_count += 1
-                if frame.motor_id != target_motor_id:
+                    consecutive_sync_frames = 0
+                else:
+                    consecutive_sync_frames += 1
+
+                if not synced_before_capture:
+                    if frame.motor_id == target_motor_id:
+                        transport.write(command_adapter.pack(target_motor_id, 0.0))
+                    rerun_recorder.log_live_motor_sample(
+                        group_index=int(group_index),
+                        round_index=int(round_index),
+                        active_motor_id=int(target_motor_id),
+                        motor_id=int(frame.motor_id),
+                        position=float(frame.position),
+                        velocity=float(frame.velocity),
+                        target_torque=0.0,
+                        feedback_torque=float(frame.torque),
+                        state=int(frame.state),
+                        mos_temperature=float(frame.mos_temperature),
+                        phase_name="sync_wait",
+                    )
+                    if sequence_ok and consecutive_sync_frames >= sync_required_frames:
+                        synced_before_capture = True
+                        sync_wait_duration_s = time.monotonic() - sync_started_monotonic
+                        capture_started_monotonic = time.monotonic()
+                        capture_started_at = utc_now_iso8601()
+                        consecutive_sync_frames = 0
+                        sequence_checker.reset()
                     continue
 
+                assert capture_started_monotonic is not None
+                elapsed_s = time.monotonic() - capture_started_monotonic
+                if elapsed_s >= reference.duration_s:
+                    capture_complete = True
+                    break
                 reference_sample = reference.sample(elapsed_s)
-                command_raw, command_limited = controller.update(target_motor_id, reference_sample, frame)
-                command = command_adapter.limit_command(target_motor_id, command_limited)
-                transport.write(command_adapter.pack(target_motor_id, command))
 
-                time_log.append(float(elapsed_s))
-                motor_id_log.append(int(frame.motor_id))
-                position_log.append(float(frame.position))
-                velocity_log.append(float(frame.velocity))
-                torque_log.append(float(frame.torque))
-                command_raw_log.append(float(command_raw))
-                command_log.append(float(command))
-                position_cmd_log.append(float(reference_sample.position_cmd))
-                velocity_cmd_log.append(float(reference_sample.velocity_cmd))
-                acceleration_cmd_log.append(float(reference_sample.acceleration_cmd))
-                phase_log.append(str(reference_sample.phase_name))
-                state_log.append(int(frame.state))
-                mos_temperature_log.append(float(frame.mos_temperature))
-                id_match_log.append(True)
-                rerun_recorder.log_live_sample(
-                    group_index=int(group_index),
-                    round_index=int(round_index),
-                    motor_id=int(frame.motor_id),
-                    motor_name=motor_name,
-                    sample_index=len(time_log) - 1,
-                    elapsed_s=float(elapsed_s),
+                command_raw = 0.0
+                command = 0.0
+                if frame.motor_id == target_motor_id:
+                    command_raw, command_limited = controller.update(target_motor_id, reference_sample, frame)
+                    command = command_adapter.limit_command(target_motor_id, command_limited)
+                    transport.write(command_adapter.pack(target_motor_id, command))
+                    target_frame_count += 1
+
+                    time_log.append(float(elapsed_s))
+                    motor_id_log.append(int(frame.motor_id))
+                    position_log.append(float(frame.position))
+                    velocity_log.append(float(frame.velocity))
+                    torque_log.append(float(frame.torque))
+                    command_raw_log.append(float(command_raw))
+                    command_log.append(float(command))
+                    position_cmd_log.append(float(reference_sample.position_cmd))
+                    velocity_cmd_log.append(float(reference_sample.velocity_cmd))
+                    acceleration_cmd_log.append(float(reference_sample.acceleration_cmd))
+                    phase_log.append(str(reference_sample.phase_name))
+                    state_log.append(int(frame.state))
+                    mos_temperature_log.append(float(frame.mos_temperature))
+                    id_match_log.append(True)
+                    rerun_recorder.log_live_sample(
+                        group_index=int(group_index),
+                        round_index=int(round_index),
+                        motor_id=int(frame.motor_id),
+                        motor_name=motor_name,
+                        sample_index=len(time_log) - 1,
+                        elapsed_s=float(elapsed_s),
+                        position=float(frame.position),
+                        position_cmd=float(reference_sample.position_cmd),
+                        velocity=float(frame.velocity),
+                        velocity_cmd=float(reference_sample.velocity_cmd),
+                        command_raw=float(command_raw),
+                        command=float(command),
+                        torque_feedback=float(frame.torque),
+                        phase_name=str(reference_sample.phase_name),
+                    )
+
+                    rerun_recorder.log_live_motor_sample(
+                        group_index=int(group_index),
+                        round_index=int(round_index),
+                        active_motor_id=int(target_motor_id),
+                        motor_id=int(frame.motor_id),
                     position=float(frame.position),
-                    position_cmd=float(reference_sample.position_cmd),
                     velocity=float(frame.velocity),
-                    velocity_cmd=float(reference_sample.velocity_cmd),
-                    command_raw=float(command_raw),
-                    command=float(command),
-                    torque_feedback=float(frame.torque),
-                    phase_name=str(reference_sample.phase_name),
-                )
+                    target_torque=float(command),
+                    feedback_torque=float(frame.torque),
+                    state=int(frame.state),
+                    mos_temperature=float(frame.mos_temperature),
+                        phase_name=str(reference_sample.phase_name),
+                    )
+
+            if capture_complete:
+                break
 
             if not saw_frame and not chunk:
                 time.sleep(max(float(config.serial.read_timeout), 1.0e-3))
@@ -130,16 +200,39 @@ def _capture_round(
         interrupted = True
     finally:
         transport.write(command_adapter.pack(target_motor_id, 0.0))
+        rerun_recorder.log_round_stop(
+            group_index=int(group_index),
+            round_index=int(round_index),
+            motor_id=int(target_motor_id),
+            phase_name="interrupted" if interrupted else "round_complete",
+        )
 
+    sequence_error_ratio = float(sequence_error_count / observed_frame_count) if observed_frame_count else 0.0
+    target_frame_ratio = min(float(target_frame_count / target_frame_goal), 1.0) if target_frame_goal else 0.0
+    stop_reason = "interrupted" if interrupted else "completed"
+    if not synced_before_capture and not interrupted:
+        stop_reason = "sync_timeout"
     metadata = {
         "group_index": int(group_index),
         "round_index": int(round_index),
         "target_motor_id": int(target_motor_id),
         "enabled_motor_ids": list(config.enabled_motor_ids),
         "excitation_config": asdict(config.excitation),
-        "start_time": started_at,
-        "stop_reason": "interrupted" if interrupted else "completed",
+        "start_time": capture_started_at or round_started_at,
+        "round_start_time": round_started_at,
+        "stop_reason": stop_reason,
+        "synced_before_capture": bool(synced_before_capture),
+        "sync_wait_duration_s": float(sync_wait_duration_s),
+        "sync_timeout": float(config.serial.sync_timeout),
+        "sync_required_frames": int(sync_required_frames),
+        "observed_frame_count": int(observed_frame_count),
         "sequence_error_count": int(sequence_error_count),
+        "sequence_error_ratio": float(sequence_error_ratio),
+        "target_frame_goal": int(target_frame_goal),
+        "target_frame_count": int(target_frame_count),
+        "target_frame_ratio": float(target_frame_ratio),
+        "target_max_velocity": target_max_velocity,
+        "target_max_torque": target_max_torque,
     }
     capture = RoundCapture(
         group_index=int(group_index),
@@ -178,7 +271,11 @@ def run_sequential_identification(
         torque_limits=config.control.max_torque,
     )
     controller = SingleMotorController(config)
-    rerun_recorder = RerunRecorder(store.rerun_recording_path)
+    rerun_recorder = RerunRecorder(
+        store.rerun_recording_path,
+        motor_ids=config.motor_ids,
+        motor_names={motor_id: config.motors.name_for(motor_id) for motor_id in config.motor_ids},
+    )
     artifacts: list[RoundArtifact] = []
 
     transport = transport_factory() if transport_factory is not None else open_serial_transport(config.serial)
@@ -206,7 +303,12 @@ def run_sequential_identification(
                     round_index=int(current_round),
                     rerun_recorder=rerun_recorder,
                 )
-                identification = identify_motor_friction(config.identification, capture)
+                identification = identify_motor_friction(
+                    config.identification,
+                    capture,
+                    max_torque=float(config.control.max_torque[config.motor_index(target_motor_id)]),
+                    max_velocity=float(config.control.max_velocity[config.motor_index(target_motor_id)]),
+                )
                 capture_path = store.save_capture(capture)
                 identification_path = store.save_identification(capture, identification)
                 rerun_recorder.log_identification(capture, identification)

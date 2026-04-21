@@ -103,6 +103,7 @@ class MotorSequenceChecker:
 
     def reset(self) -> None:
         self._expected_motor_id = None
+        self.error_count = 0
 
     def _next_motor_id(self, current_motor_id: int) -> int:
         index = self._motor_ids.index(int(current_motor_id))

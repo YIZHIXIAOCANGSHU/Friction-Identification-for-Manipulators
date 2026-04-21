@@ -75,6 +75,9 @@ class MotorIdentificationResult:
     torque_pred: np.ndarray
     torque_target: np.ndarray
     sample_mask: np.ndarray
+    steady_state_mask: np.ndarray
+    tracking_ok_mask: np.ndarray
+    saturation_ok_mask: np.ndarray
     train_mask: np.ndarray
     valid_mask: np.ndarray
     train_rmse: float
