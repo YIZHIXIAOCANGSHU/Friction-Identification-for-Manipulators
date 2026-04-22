@@ -109,6 +109,7 @@ class ExcitationConfig:
 class ControlConfig:
     max_velocity: np.ndarray
     max_torque: np.ndarray
+    velocity_p_gain: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -285,9 +286,13 @@ def _parse_control(raw: dict[str, Any], motor_count: int) -> ControlConfig:
     )
     if np.any(max_torque <= 0.0):
         raise ValueError("control.max_torque must all be > 0.")
+    velocity_p_gain = _expand_float_vector(raw.get("velocity_p_gain", 1.0), motor_count, name="control.velocity_p_gain")
+    if np.any(velocity_p_gain < 0.0):
+        raise ValueError("control.velocity_p_gain must all be >= 0.")
     return ControlConfig(
         max_velocity=max_velocity,
         max_torque=max_torque,
+        velocity_p_gain=velocity_p_gain,
     )
 
 

@@ -1,0 +1,32 @@
+{
+  "run_label": "20260422_135327_identify",
+  "mode": "identify",
+  "start_time": "2026-04-22T05:53:27+00:00",
+  "end_time": "2026-04-22T05:53:40+00:00",
+  "group_count": 1,
+  "motor_order": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "capture_files": [
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_135327_identify/group_01/motor_01/capture.npz"
+  ],
+  "identification_files": [
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_135327_identify/group_01/motor_01/identification.npz"
+  ],
+  "summary_files": {
+    "run_summary_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_135327_identify/summary/hardware_identification_summary.npz",
+    "run_summary_csv_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_135327_identify/summary/hardware_identification_summary.csv",
+    "run_summary_report_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_135327_identify/summary/hardware_identification_report.md",
+    "root_summary_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_summary.npz",
+    "root_summary_csv_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_summary.csv",
+    "root_summary_report_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_report.md"
+  },
+  "rerun_recording_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_135327_identify/identify.rrd",
+  "config_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/friction_identification_core/default.yaml"
+}

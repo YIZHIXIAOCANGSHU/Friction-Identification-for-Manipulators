@@ -72,12 +72,12 @@ class MotorCompensationParameters:
     offset: float
     velocity_scale: float
 
-    def feedforward_torque(self, velocity_cmd: float) -> float:
+    def feedforward_torque(self, velocity: float) -> float:
         scale = max(float(self.velocity_scale), 1.0e-6)
-        velocity_cmd = float(velocity_cmd)
+        velocity = float(velocity)
         return float(
-            float(self.coulomb) * np.tanh(velocity_cmd / scale)
-            + float(self.viscous) * velocity_cmd
+            float(self.coulomb) * np.tanh(velocity / scale)
+            + float(self.viscous) * velocity
             + float(self.offset)
         )
 

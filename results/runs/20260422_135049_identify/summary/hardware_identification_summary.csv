@@ -1,0 +1,8 @@
+motor_id,motor_name,status,identified,synced_before_capture,sequence_error_count,sequence_error_ratio,target_frame_count,target_frame_ratio,planned_duration_s,actual_capture_duration_s,round_total_duration_s,validation_mode,validation_reason,recommended_for_runtime,conclusion_level,conclusion_text,train_platforms,valid_platforms,saturation_ratio,tracking_error_ratio,high_speed_platform_count,high_speed_valid_rmse,coulomb,viscous,offset,velocity_scale,validation_rmse,validation_r2,sample_count,valid_sample_ratio,coulomb_std,viscous_std,offset_std,round_count
+1,motor_01,insufficient_target_frames,False,True,0,0.0,396,0.030602782071097373,64.7,50.31033367395867,50.36105282395147,train_only,insufficient_target_frames,False,reject,辨识失败: insufficient_target_frames,,,0.0,0.0,0,nan,nan,nan,nan,nan,nan,nan,0,0.0,nan,nan,nan,1
+2,motor_02,,False,False,0,nan,0,nan,nan,nan,nan,,,False,not_run,-,,,nan,nan,0,nan,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0
+3,motor_03,,False,False,0,nan,0,nan,nan,nan,nan,,,False,not_run,-,,,nan,nan,0,nan,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0
+4,motor_04,,False,False,0,nan,0,nan,nan,nan,nan,,,False,not_run,-,,,nan,nan,0,nan,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0
+5,motor_05,,False,False,0,nan,0,nan,nan,nan,nan,,,False,not_run,-,,,nan,nan,0,nan,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0
+6,motor_06,,False,False,0,nan,0,nan,nan,nan,nan,,,False,not_run,-,,,nan,nan,0,nan,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0
+7,motor_07,,False,False,0,nan,0,nan,nan,nan,nan,,,False,not_run,-,,,nan,nan,0,nan,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0

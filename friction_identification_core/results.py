@@ -150,6 +150,10 @@ class ResultStore:
     def _write_manifest(self) -> None:
         write_json(self.manifest_path, self._manifest)
 
+    def record_abort_event(self, payload: dict[str, Any]) -> None:
+        self._manifest["abort_event"] = _normalize_json_value(payload)
+        self._write_manifest()
+
     def finalize(self, *, compensation_parameters_path: Path | None = None) -> None:
         self._manifest["end_time"] = utc_now_iso8601()
         if compensation_parameters_path is not None:

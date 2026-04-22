@@ -100,25 +100,25 @@ excitation:
     # 低速段：更容易看到起步附近的库仑摩擦特性。
     - speed_ratio: 0.12
       # 到达目标速度后先等待瞬态衰减。
-      settle_duration: 0.30
+      settle_duration: 1.00
       # 真正用于稳态辨识的数据采样窗口。
-      steady_duration: 0.90
+      steady_duration: 2.50
     # 低中速段：补充更宽一点的速度覆盖。
     - speed_ratio: 0.28
-      settle_duration: 0.35
-      steady_duration: 1.00
+      settle_duration: 1.50
+      steady_duration: 3.00
     # 中速段：通常是时长和信噪比较均衡的一档。
     - speed_ratio: 0.50
-      settle_duration: 0.45
-      steady_duration: 1.20
+      settle_duration: 2.00
+      steady_duration: 3.50
     # 中高速段：帮助区分更明显的速度相关摩擦项。
     - speed_ratio: 0.72
-      settle_duration: 0.60
-      steady_duration: 1.40
+      settle_duration: 3.00
+      steady_duration: 4.50
     # 高速段：补足高速度区间信息，通常需要更长稳定时间。
     - speed_ratio: 0.90
-      settle_duration: 0.80
-      steady_duration: 1.70
+      settle_duration: 5.00
+      steady_duration: 5.00
 ```
 
 - `speed` 是绝对速度值
@@ -150,14 +150,18 @@ excitation:
 
 `compensate` 模式会复用当前顺序和激励轨迹，但不会再做辨识。它会：
 
-- 默认读取 `results/hardware_identification_summary.npz`
+- 直接复用最新可用的辨识参数做补偿验证，不会触发新的辨识
+- 默认会优先读取当前 `results_dir` 中最近一次已完成 `identify` 运行的 summary
+- 如果没有可用的已完成 `identify` summary，就回退到当前 `results_dir` 根目录下的最新 summary 快照
 - 只接受 `recommended_for_runtime = true` 且参数有限的目标电机
 - 对当前目标电机使用
-  - `速度误差反馈`
-  - `+ 基于 reference.velocity_cmd 的摩擦前馈`
+  - `hold_start` 阶段固定发送 `0` 扭矩
+  - 其他相位直接按当前 `feedback.velocity` 计算摩擦前馈
+  - 当前实现不会叠加 `velocity_p_gain` 速度误差反馈，只做前馈 + 扭矩限幅
 - 记录速度跟踪结果，重点看 `expected velocity / actual velocity / velocity_error`
+- `capture.metadata` 里会额外写入 `tracking_velocity_rmse / tracking_velocity_mae / tracking_velocity_max_abs`
 
-补偿模式不会覆盖根目录的辨识 summary，也不会写 `identification.npz`。
+自动查找范围始终受当前配置的 `results_dir` 约束，因此 `--output` 会同时影响结果写入位置，以及 `compensate` 自动发现参数的位置。补偿模式不会覆盖根目录的辨识 summary，也不会写 `identification.npz`。
 
 ## 执行时间为什么会和预期不一样
 
@@ -181,6 +185,12 @@ excitation:
 - 墙钟时间驱动采集带来的轻微偏差
 
 当前停止条件是“墙钟采集时长达到规划时长”，不是“严格采满 `sample_rate * duration` 个目标帧”。所以样本数和总执行时间都不应该按理想采样周期去硬推。
+
+按当前默认配置和 `sample_rate = 200Hz` 计算，参考轨迹的理论样本点数是：
+
+`64.7 * 200 = 12940`
+
+运行时还新增了硬保护：只要目标电机的反馈速度超过当前相位允许上限，或者反馈力矩超过该电机 `max_torque`，程序就会立刻发送零扭矩并终止本次 run。
 
 ## 运行方式
 
@@ -213,8 +223,12 @@ python3 -m friction_identification_core --config friction_identification_core/de
 
 每次运行会在 `results/runs/<timestamp>_<mode>/` 下归档。
 
-- `identify` 会同步写一份最新 summary 到 `results/`
+- `identify` 会在本次运行目录下写出 summary，并同步更新当前 `results_dir` 根目录的最新 summary 快照
+- `compensate` 会优先读取当前 `results_dir` 下最近一次已完成 `identify` 的 run summary，找不到时再回退到根目录快照
 - `compensate` 只写本次运行目录，不会覆盖根目录辨识 summary
+- 运行时如果触发速度/力矩超限，当前正在执行的 round 会直接丢弃，不会写 `capture.npz` 或 `identification.npz`
+- 超限原因会写进 `run_manifest.json` 的 `abort_event`
+- `identify` 模式下，如果前面已有已完成 rounds，会基于这些已完成 rounds 正常生成 summary；如果在第一轮就超限，则只保留 manifest
 
 核心产物：
 
@@ -242,6 +256,10 @@ python3 -m friction_identification_core --config friction_identification_core/de
   - `synced_before_capture`
   - `saturation_ratio`
   - `tracking_error_ratio`
+- 补偿跟踪指标
+  - `tracking_velocity_rmse`
+  - `tracking_velocity_mae`
+  - `tracking_velocity_max_abs`
 - 辨识状态
   - `status`
   - `sample_count`

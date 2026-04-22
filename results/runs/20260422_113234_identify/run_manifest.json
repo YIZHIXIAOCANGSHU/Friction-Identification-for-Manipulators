@@ -1,0 +1,38 @@
+{
+  "run_label": "20260422_113234_identify",
+  "mode": "identify",
+  "start_time": "2026-04-22T03:32:34+00:00",
+  "end_time": "2026-04-22T03:35:10+00:00",
+  "group_count": 1,
+  "motor_order": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "capture_files": [
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/group_01/motor_01/capture.npz",
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/group_01/motor_02/capture.npz",
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/group_01/motor_03/capture.npz",
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/group_01/motor_04/capture.npz"
+  ],
+  "identification_files": [
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/group_01/motor_01/identification.npz",
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/group_01/motor_02/identification.npz",
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/group_01/motor_03/identification.npz",
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/group_01/motor_04/identification.npz"
+  ],
+  "summary_files": {
+    "run_summary_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/summary/hardware_identification_summary.npz",
+    "run_summary_csv_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/summary/hardware_identification_summary.csv",
+    "run_summary_report_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/summary/hardware_identification_report.md",
+    "root_summary_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_summary.npz",
+    "root_summary_csv_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_summary.csv",
+    "root_summary_report_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/hardware_identification_report.md"
+  },
+  "rerun_recording_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_113234_identify/identify.rrd",
+  "config_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/friction_identification_core/default.yaml"
+}

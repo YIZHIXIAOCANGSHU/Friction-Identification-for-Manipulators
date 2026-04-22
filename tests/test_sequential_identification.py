@@ -54,9 +54,9 @@ class SequencedFakeTransport:
         frames = bytearray()
         for motor_id in self._cycle_motor_ids():
             angle = 0.08 * self._step + 0.05 * motor_id
-            position = 0.2 * np.sin(angle)
-            velocity = 0.25 * np.sin(0.4 * angle)
-            torque = 0.85 * np.tanh(velocity / 0.05) + 0.09 * velocity + 0.01 * motor_id
+            position = 0.02 * np.sin(angle)
+            velocity = 0.01 * np.sin(0.4 * angle)
+            torque = 0.20 * np.tanh(velocity / 0.05) + 0.03 * velocity + 0.005 * motor_id
             frames.extend(
                 RECV_FRAME_STRUCT.pack(
                     RECV_FRAME_HEAD,
@@ -95,6 +95,54 @@ class SequencedFakeTransport:
 class OutOfOrderFakeTransport(SequencedFakeTransport):
     def _cycle_motor_ids(self) -> tuple[int, ...]:
         return (1, 3, 2, 4, 5, 7, 6)
+
+
+class TrippingFakeTransport(SequencedFakeTransport):
+    def __init__(
+        self,
+        motor_ids: tuple[int, ...],
+        *,
+        trip_motor_id: int,
+        trip_target_frame_count: int = 1,
+        trip_velocity: float | None = None,
+        trip_torque: float | None = None,
+        sleep_s: float = 0.001,
+    ) -> None:
+        super().__init__(motor_ids, sleep_s=sleep_s)
+        self._trip_motor_id = int(trip_motor_id)
+        self._trip_target_frame_count = max(int(trip_target_frame_count), 1)
+        self._trip_velocity = None if trip_velocity is None else float(trip_velocity)
+        self._trip_torque = None if trip_torque is None else float(trip_torque)
+        self._target_frame_count = 0
+
+    def _build_cycle_bytes(self) -> bytes:
+        frames = bytearray()
+        for motor_id in self._cycle_motor_ids():
+            angle = 0.08 * self._step + 0.05 * motor_id
+            position = 0.02 * np.sin(angle)
+            velocity = 0.02 * np.sin(0.4 * angle)
+            torque = 0.25 * np.tanh(velocity / 0.05) + 0.03 * velocity + 0.005 * motor_id
+            if int(motor_id) == self._trip_motor_id:
+                self._target_frame_count += 1
+                if self._target_frame_count >= self._trip_target_frame_count:
+                    if self._trip_velocity is not None:
+                        velocity = float(self._trip_velocity)
+                    if self._trip_torque is not None:
+                        torque = float(self._trip_torque)
+            frames.extend(
+                RECV_FRAME_STRUCT.pack(
+                    RECV_FRAME_HEAD,
+                    int(motor_id),
+                    1,
+                    float(position),
+                    float(velocity),
+                    float(torque),
+                    float(30.0 + motor_id),
+                )
+            )
+            self._step += 1
+        self._cycle_index += 1
+        return bytes(frames)
 
 
 def _platform(
@@ -206,6 +254,7 @@ def _write_runtime_summary(
     motor_ids: tuple[int, ...],
     recommended_motor_ids: tuple[int, ...] | None = None,
 ) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     recommended_set = set(motor_ids if recommended_motor_ids is None else recommended_motor_ids)
     motor_id_array = np.asarray(motor_ids, dtype=np.int64)
     motor_names = np.asarray([f"motor_{motor_id:02d}" for motor_id in motor_ids])
@@ -232,7 +281,56 @@ def _write_runtime_summary(
     return path
 
 
+def _write_identify_run_manifest(
+    results_dir: Path,
+    *,
+    run_label: str,
+    end_time: str | None,
+    summary_path: Path | None = None,
+) -> Path:
+    run_dir = results_dir / "runs" / run_label
+    summary_dir = run_dir / "summary"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = run_dir / "run_manifest.json"
+    summary_files = {}
+    if summary_path is not None:
+        summary_files = {
+            "run_summary_path": str(summary_path.resolve()),
+            "run_summary_csv_path": str((summary_dir / "hardware_identification_summary.csv").resolve()),
+            "run_summary_report_path": str((summary_dir / "hardware_identification_report.md").resolve()),
+            "root_summary_path": str((results_dir / "hardware_identification_summary.npz").resolve()),
+            "root_summary_csv_path": str((results_dir / "hardware_identification_summary.csv").resolve()),
+            "root_summary_report_path": str((results_dir / "hardware_identification_report.md").resolve()),
+        }
+    manifest = {
+        "run_label": run_label,
+        "mode": "identify",
+        "start_time": "2026-04-22T00:00:00+00:00",
+        "end_time": end_time,
+        "group_count": 1,
+        "motor_order": [1, 3],
+        "capture_files": [],
+        "identification_files": [],
+        "summary_files": summary_files,
+        "rerun_recording_path": str((run_dir / "identify.rrd").resolve()),
+        "config_path": str((results_dir / "test_config.yaml").resolve()),
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return manifest_path
+
+
 class SequentialIdentificationTests(unittest.TestCase):
+    def test_default_config_reference_trajectory_duration_matches_documented_timing(self) -> None:
+        config = load_config(DEFAULT_CONFIG_PATH)
+
+        trajectory = build_reference_trajectory(
+            config.excitation,
+            max_velocity=float(config.control.max_velocity[0]),
+        )
+
+        self.assertAlmostEqual(float(trajectory.duration_s), 64.7, places=6)
+        self.assertEqual(int(trajectory.time.size), 12940)
+
     def test_default_config_exposes_explicit_excitation_platforms(self) -> None:
         config = load_config(DEFAULT_CONFIG_PATH)
 
@@ -353,6 +451,8 @@ excitation:
         readme = README_PATH.read_text(encoding="utf-8")
         self.assertIn("CLI 主模式是 `identify` 和 `compensate`", readme)
         self.assertIn("`default` 和 `sequential` 仅作为 `identify` 的兼容别名", readme)
+        self.assertIn("优先读取当前 `results_dir` 中最近一次已完成 `identify` 运行的 summary", readme)
+        self.assertIn("`--output` 会同时影响结果写入位置，以及 `compensate` 自动发现参数的位置", readme)
 
     def test_main_enables_rerun_viewer_for_identify_mode(self) -> None:
         loaded_config = object()
@@ -444,9 +544,11 @@ excitation:
         config = load_config(DEFAULT_CONFIG_PATH)
         controller = SingleMotorController(config)
         motor_index = config.motor_index(5)
+        velocity_p_gain = float(config.control.velocity_p_gain[motor_index])
+        max_torque = float(config.control.max_torque[motor_index])
         reference = ReferenceSample(
             position_cmd=0.0,
-            velocity_cmd=float(config.control.max_velocity[motor_index]) * 2.0,
+            velocity_cmd=max_torque / max(velocity_p_gain, 1.0e-9) * 2.0,
             acceleration_cmd=0.0,
             phase_name="test",
         )
@@ -461,10 +563,42 @@ excitation:
 
         raw_command, limited_command = controller.update(5, reference, feedback)
 
-        self.assertGreater(raw_command, 7.0)
-        self.assertAlmostEqual(limited_command, 7.0, places=6)
+        self.assertGreater(raw_command, max_torque)
+        self.assertAlmostEqual(limited_command, max_torque, places=6)
 
-    def test_controller_adds_friction_feedforward_in_compensation_mode(self) -> None:
+    def test_controller_uses_configured_velocity_p_gain(self) -> None:
+        base_config = load_config(DEFAULT_CONFIG_PATH)
+        config = replace(
+            base_config,
+            control=replace(
+                base_config.control,
+                velocity_p_gain=np.full_like(base_config.control.velocity_p_gain, 0.25),
+            ),
+        )
+        controller = SingleMotorController(config)
+        motor_index = config.motor_index(5)
+        reference = ReferenceSample(
+            position_cmd=0.0,
+            velocity_cmd=1.0,
+            acceleration_cmd=0.0,
+            phase_name="test",
+        )
+        feedback = FeedbackFrame(
+            motor_id=5,
+            state=1,
+            position=0.0,
+            velocity=0.0,
+            torque=0.0,
+            mos_temperature=30.0,
+        )
+
+        raw_command, limited_command = controller.update(5, reference, feedback)
+
+        expected = 0.25 * (float(reference.velocity_cmd) - float(feedback.velocity))
+        self.assertAlmostEqual(raw_command, expected, places=6)
+        self.assertAlmostEqual(limited_command, expected, places=6)
+
+    def test_controller_uses_feedback_velocity_for_compensation_mode(self) -> None:
         config = load_config(DEFAULT_CONFIG_PATH)
         controller = SingleMotorController(config)
         params = MotorCompensationParameters(
@@ -491,10 +625,21 @@ excitation:
         )
 
         raw_command, limited_command = controller.update(5, reference, feedback, compensation=params)
+        expected = params.feedforward_torque(float(feedback.velocity))
 
-        self.assertGreater(raw_command, 0.0)
+        self.assertAlmostEqual(raw_command, expected, places=6)
         self.assertAlmostEqual(raw_command, limited_command, places=6)
-        self.assertGreater(raw_command, 0.25)
+
+        faster_reference = replace(reference, velocity_cmd=1.8)
+        faster_raw_command, faster_limited_command = controller.update(
+            5,
+            faster_reference,
+            feedback,
+            compensation=params,
+        )
+
+        self.assertAlmostEqual(faster_raw_command, expected, places=6)
+        self.assertAlmostEqual(faster_limited_command, expected, places=6)
 
     def test_capture_waits_for_sync_before_sampling(self) -> None:
         base_config = load_config(DEFAULT_CONFIG_PATH)
@@ -591,6 +736,53 @@ excitation:
             self.assertEqual(float(metadata["sequence_error_ratio"]), 0.0)
             self.assertGreater(capture.sample_count, 0)
             self.assertGreater(float(np.max(np.abs(capture.command))), 0.0)
+
+    def test_hold_start_remains_zero_torque_in_identify_mode(self) -> None:
+        base_config = load_config(DEFAULT_CONFIG_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = replace(
+                base_config,
+                motors=replace(base_config.motors, enabled_ids=(1,)),
+                excitation=replace(
+                    base_config.excitation,
+                    hold_start=0.08,
+                    hold_end=0.0,
+                    sample_rate=60.0,
+                    transition_duration=0.01,
+                    platforms=(
+                        _platform(0.08, 0.02, 0.06),
+                    ),
+                ),
+                identification=replace(
+                    base_config.identification,
+                    min_samples=1,
+                    min_motion_span=0.0,
+                    min_target_frame_ratio=0.1,
+                    max_sequence_error_ratio=0.6,
+                ),
+                serial=replace(
+                    base_config.serial,
+                    read_chunk_size=1024,
+                    read_timeout=0.001,
+                    sync_timeout=0.08,
+                    sync_cycles_required=1,
+                ),
+                output=replace(base_config.output, results_dir=Path(tmpdir)),
+            )
+
+            result = run_sequential_identification(
+                config,
+                transport_factory=lambda: SequencedFakeTransport(config.motor_ids, sleep_s=0.001),
+            )
+
+            capture = result.artifacts[0].capture
+            hold_start_mask = capture.phase_name == "hold_start"
+            self.assertTrue(np.any(hold_start_mask))
+            self.assertTrue(np.allclose(capture.command_raw[hold_start_mask], 0.0))
+            self.assertTrue(np.allclose(capture.command[hold_start_mask], 0.0))
+            nonzero_command_indices = np.flatnonzero(np.abs(capture.command) > 1.0e-9)
+            self.assertGreater(nonzero_command_indices.size, 0)
+            self.assertGreater(int(nonzero_command_indices[0]), int(np.flatnonzero(hold_start_mask)[-1]))
 
     def test_reference_trajectory_uses_platform_settle_and_steady_phases(self) -> None:
         config = load_config(DEFAULT_CONFIG_PATH)
@@ -933,6 +1125,199 @@ excitation:
             self.assertIn("## Runtime Conclusions", report_text)
             self.assertIn("recommended_for_runtime", report_text)
 
+    def test_identify_mode_aborts_when_target_velocity_exceeds_current_phase_limit(self) -> None:
+        base_config = load_config(DEFAULT_CONFIG_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_dir = Path(tmpdir)
+            config = replace(
+                base_config,
+                motors=replace(base_config.motors, enabled_ids=(1,)),
+                excitation=replace(
+                    base_config.excitation,
+                    hold_start=0.0,
+                    hold_end=0.0,
+                    sample_rate=100.0,
+                    transition_duration=0.01,
+                    platforms=(
+                        _platform(None, 0.02, 0.08, speed_ratio=0.12),
+                    ),
+                ),
+                identification=replace(
+                    base_config.identification,
+                    min_samples=1,
+                    min_motion_span=0.0,
+                    min_target_frame_ratio=0.1,
+                ),
+                serial=replace(
+                    base_config.serial,
+                    read_chunk_size=1024,
+                    read_timeout=0.001,
+                    sync_timeout=0.08,
+                    sync_cycles_required=1,
+                ),
+                control=replace(
+                    base_config.control,
+                    max_velocity=np.full_like(base_config.control.max_velocity, 0.25),
+                ),
+                output=replace(base_config.output, results_dir=results_dir),
+            )
+
+            transport = TrippingFakeTransport(
+                config.motor_ids,
+                trip_motor_id=1,
+                trip_target_frame_count=20,
+                trip_velocity=0.2,
+                sleep_s=0.002,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"reason=velocity_limit_exceeded, motor_id=1, group_index=1, round_index=1, phase_name=steady_",
+            ):
+                run_sequential_identification(config, transport_factory=lambda: transport)
+
+            zero_packet = SingleMotorCommandAdapter(motor_count=7).pack(1, 0.0)
+            self.assertEqual(transport.writes[-1], zero_packet)
+
+            manifest_path = next((results_dir / "runs").glob("*_identify/run_manifest.json"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["abort_event"]["reason"], "velocity_limit_exceeded")
+            self.assertTrue(str(manifest["abort_event"]["phase_name"]).startswith("steady_"))
+            self.assertEqual(manifest["capture_files"], [])
+            self.assertEqual(manifest["identification_files"], [])
+            self.assertFalse((manifest_path.parent / "group_01" / "motor_01" / "capture.npz").exists())
+
+    def test_identify_mode_keeps_completed_rounds_summary_when_later_round_aborts(self) -> None:
+        base_config = load_config(DEFAULT_CONFIG_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_dir = Path(tmpdir)
+            config = replace(
+                base_config,
+                motors=replace(base_config.motors, enabled_ids=(1, 3)),
+                excitation=replace(
+                    base_config.excitation,
+                    hold_start=0.0,
+                    hold_end=0.0,
+                    sample_rate=60.0,
+                    transition_duration=0.01,
+                    platforms=(
+                        _platform(None, 0.02, 0.08, speed_ratio=0.12),
+                    ),
+                ),
+                identification=replace(
+                    base_config.identification,
+                    min_samples=1,
+                    min_motion_span=0.0,
+                    min_target_frame_ratio=0.1,
+                ),
+                serial=replace(
+                    base_config.serial,
+                    read_chunk_size=1024,
+                    read_timeout=0.001,
+                    sync_timeout=0.08,
+                    sync_cycles_required=1,
+                ),
+                control=replace(
+                    base_config.control,
+                    max_velocity=np.full_like(base_config.control.max_velocity, 0.25),
+                ),
+                output=replace(base_config.output, results_dir=results_dir),
+            )
+
+            with self.assertRaisesRegex(ValueError, r"reason=velocity_limit_exceeded, motor_id=3"):
+                run_sequential_identification(
+                    config,
+                    transport_factory=lambda: TrippingFakeTransport(
+                        config.motor_ids,
+                        trip_motor_id=3,
+                        trip_target_frame_count=1,
+                        trip_velocity=0.2,
+                        sleep_s=0.002,
+                    ),
+                )
+
+            manifest_path = next((results_dir / "runs").glob("*_identify/run_manifest.json"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(manifest["capture_files"]), 1)
+            self.assertEqual(len(manifest["identification_files"]), 1)
+            self.assertEqual(manifest["abort_event"]["motor_id"], 3)
+            self.assertTrue((manifest_path.parent / "summary" / base_config.output.summary_filename).exists())
+            self.assertTrue((results_dir / base_config.output.summary_filename).exists())
+            self.assertTrue((manifest_path.parent / "group_01" / "motor_01" / "capture.npz").exists())
+            self.assertFalse((manifest_path.parent / "group_01" / "motor_03" / "capture.npz").exists())
+            self.assertFalse((manifest_path.parent / "group_01" / "motor_03" / "identification.npz").exists())
+
+    def test_compensation_mode_aborts_when_feedback_torque_exceeds_limit(self) -> None:
+        base_config = load_config(DEFAULT_CONFIG_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_dir = Path(tmpdir)
+            params_path = _write_runtime_summary(
+                results_dir / "summary.npz",
+                motor_ids=(1,),
+                recommended_motor_ids=(1,),
+            )
+            config = replace(
+                base_config,
+                motors=replace(base_config.motors, enabled_ids=(1,)),
+                excitation=replace(
+                    base_config.excitation,
+                    hold_start=0.0,
+                    hold_end=0.0,
+                    sample_rate=60.0,
+                    transition_duration=0.01,
+                    platforms=(
+                        _platform(None, 0.02, 0.06, speed_ratio=0.12),
+                    ),
+                ),
+                identification=replace(
+                    base_config.identification,
+                    group_count=1,
+                    min_samples=1,
+                    min_motion_span=0.0,
+                    min_target_frame_ratio=0.1,
+                ),
+                serial=replace(
+                    base_config.serial,
+                    read_chunk_size=1024,
+                    read_timeout=0.001,
+                    sync_timeout=0.08,
+                    sync_cycles_required=1,
+                ),
+                control=replace(
+                    base_config.control,
+                    max_velocity=np.full_like(base_config.control.max_velocity, 0.25),
+                ),
+                output=replace(base_config.output, results_dir=results_dir),
+            )
+
+            transport = TrippingFakeTransport(
+                config.motor_ids,
+                trip_motor_id=1,
+                trip_target_frame_count=2,
+                trip_torque=50.0,
+                sleep_s=0.002,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"reason=torque_limit_exceeded, motor_id=1, group_index=1, round_index=1, phase_name=",
+            ):
+                run_compensation_validation(
+                    config,
+                    transport_factory=lambda: transport,
+                    parameters_path=params_path,
+                )
+
+            zero_packet = SingleMotorCommandAdapter(motor_count=7).pack(1, 0.0)
+            self.assertEqual(transport.writes[-1], zero_packet)
+
+            manifest_path = next((results_dir / "runs").glob("*_compensate/run_manifest.json"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["abort_event"]["reason"], "torque_limit_exceeded")
+            self.assertEqual(manifest["capture_files"], [])
+            self.assertEqual(manifest["compensation_parameters_path"], str(params_path.resolve()))
+            self.assertFalse((manifest_path.parent / "group_01" / "motor_01" / "capture.npz").exists())
+
     def test_compensation_mode_requires_recommended_runtime_parameters(self) -> None:
         base_config = load_config(DEFAULT_CONFIG_PATH)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1019,6 +1404,211 @@ excitation:
                 self.assertIn("planned_duration_s", metadata)
                 self.assertIn("actual_capture_duration_s", metadata)
                 self.assertGreater(float(metadata["tracking_velocity_rmse"]), 0.0)
+
+    def test_compensation_mode_prefers_latest_completed_identify_summary(self) -> None:
+        base_config = load_config(DEFAULT_CONFIG_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_dir = Path(tmpdir)
+            root_summary_path = _write_runtime_summary(
+                results_dir / base_config.output.summary_filename,
+                motor_ids=(1, 3),
+                recommended_motor_ids=(1, 3),
+            )
+
+            older_summary_path = _write_runtime_summary(
+                results_dir / "runs" / "20260422_090000_identify" / "summary" / base_config.output.summary_filename,
+                motor_ids=(1, 3),
+                recommended_motor_ids=(1, 3),
+            )
+            newer_summary_path = _write_runtime_summary(
+                results_dir / "runs" / "20260422_100000_identify" / "summary" / base_config.output.summary_filename,
+                motor_ids=(1, 3),
+                recommended_motor_ids=(1, 3),
+            )
+            _write_identify_run_manifest(
+                results_dir,
+                run_label="20260422_090000_identify",
+                end_time="2026-04-22T01:00:00+00:00",
+                summary_path=older_summary_path,
+            )
+            _write_identify_run_manifest(
+                results_dir,
+                run_label="20260422_100000_identify",
+                end_time="2026-04-22T02:00:00+00:00",
+                summary_path=newer_summary_path,
+            )
+            _write_identify_run_manifest(
+                results_dir,
+                run_label="20260422_110000_identify",
+                end_time=None,
+                summary_path=root_summary_path,
+            )
+
+            config = replace(
+                base_config,
+                motors=replace(base_config.motors, enabled_ids=(1, 3)),
+                excitation=replace(
+                    base_config.excitation,
+                    hold_start=0.0,
+                    hold_end=0.0,
+                    sample_rate=60.0,
+                    transition_duration=0.01,
+                    platforms=(
+                        _platform(None, 0.02, 0.06, speed_ratio=0.12),
+                    ),
+                ),
+                identification=replace(
+                    base_config.identification,
+                    group_count=1,
+                    min_samples=1,
+                    min_motion_span=0.0,
+                    min_target_frame_ratio=0.1,
+                ),
+                serial=replace(
+                    base_config.serial,
+                    read_chunk_size=1024,
+                    read_timeout=0.001,
+                    sync_timeout=0.08,
+                    sync_cycles_required=1,
+                ),
+                control=replace(
+                    base_config.control,
+                    max_velocity=np.full_like(base_config.control.max_velocity, 0.25),
+                ),
+                output=replace(base_config.output, results_dir=results_dir),
+            )
+
+            result = run_compensation_validation(
+                config,
+                transport_factory=lambda: SequencedFakeTransport(config.motor_ids, sleep_s=0.001),
+            )
+
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["compensation_parameters_path"], str(newer_summary_path.resolve()))
+            self.assertNotEqual(manifest["compensation_parameters_path"], str(root_summary_path.resolve()))
+
+            with np.load(Path(manifest["capture_files"][0]), allow_pickle=False) as capture:
+                metadata = json.loads(str(capture["metadata"]))
+                self.assertEqual(metadata["compensation_parameters_path"], str(newer_summary_path.resolve()))
+
+    def test_compensation_mode_falls_back_to_root_snapshot_when_no_completed_identify_summary_exists(self) -> None:
+        base_config = load_config(DEFAULT_CONFIG_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_dir = Path(tmpdir)
+            root_summary_path = _write_runtime_summary(
+                results_dir / base_config.output.summary_filename,
+                motor_ids=(1, 3),
+                recommended_motor_ids=(1, 3),
+            )
+            _write_identify_run_manifest(
+                results_dir,
+                run_label="20260422_090000_identify",
+                end_time=None,
+                summary_path=None,
+            )
+
+            config = replace(
+                base_config,
+                motors=replace(base_config.motors, enabled_ids=(1, 3)),
+                excitation=replace(
+                    base_config.excitation,
+                    hold_start=0.0,
+                    hold_end=0.0,
+                    sample_rate=60.0,
+                    transition_duration=0.01,
+                    platforms=(
+                        _platform(None, 0.02, 0.06, speed_ratio=0.12),
+                    ),
+                ),
+                identification=replace(
+                    base_config.identification,
+                    group_count=1,
+                    min_samples=1,
+                    min_motion_span=0.0,
+                    min_target_frame_ratio=0.1,
+                ),
+                serial=replace(
+                    base_config.serial,
+                    read_chunk_size=1024,
+                    read_timeout=0.001,
+                    sync_timeout=0.08,
+                    sync_cycles_required=1,
+                ),
+                control=replace(
+                    base_config.control,
+                    max_velocity=np.full_like(base_config.control.max_velocity, 0.25),
+                ),
+                output=replace(base_config.output, results_dir=results_dir),
+            )
+
+            result = run_compensation_validation(
+                config,
+                transport_factory=lambda: SequencedFakeTransport(config.motor_ids, sleep_s=0.001),
+            )
+
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["compensation_parameters_path"], str(root_summary_path.resolve()))
+
+            with np.load(Path(manifest["capture_files"][0]), allow_pickle=False) as capture:
+                metadata = json.loads(str(capture["metadata"]))
+                self.assertEqual(metadata["compensation_parameters_path"], str(root_summary_path.resolve()))
+
+    def test_hold_start_remains_zero_torque_in_compensation_mode(self) -> None:
+        base_config = load_config(DEFAULT_CONFIG_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params_path = _write_runtime_summary(
+                Path(tmpdir) / "summary.npz",
+                motor_ids=(1,),
+                recommended_motor_ids=(1,),
+            )
+            config = replace(
+                base_config,
+                motors=replace(base_config.motors, enabled_ids=(1,)),
+                excitation=replace(
+                    base_config.excitation,
+                    hold_start=0.08,
+                    hold_end=0.0,
+                    sample_rate=60.0,
+                    transition_duration=0.01,
+                    platforms=(
+                        _platform(None, 0.02, 0.06, speed_ratio=0.12),
+                    ),
+                ),
+                identification=replace(
+                    base_config.identification,
+                    group_count=1,
+                    min_samples=1,
+                    min_motion_span=0.0,
+                    min_target_frame_ratio=0.1,
+                ),
+                serial=replace(
+                    base_config.serial,
+                    read_chunk_size=1024,
+                    read_timeout=0.001,
+                    sync_timeout=0.08,
+                    sync_cycles_required=1,
+                ),
+                control=replace(
+                    base_config.control,
+                    max_velocity=np.full_like(base_config.control.max_velocity, 0.25),
+                ),
+                output=replace(base_config.output, results_dir=Path(tmpdir)),
+            )
+
+            result = run_compensation_validation(
+                config,
+                transport_factory=lambda: SequencedFakeTransport(config.motor_ids, sleep_s=0.001),
+                parameters_path=params_path,
+            )
+
+            capture = result.artifacts[0].capture
+            hold_start_mask = capture.phase_name == "hold_start"
+            self.assertTrue(np.any(hold_start_mask))
+            self.assertTrue(np.allclose(capture.command_raw[hold_start_mask], 0.0))
+            self.assertTrue(np.allclose(capture.command[hold_start_mask], 0.0))
+            nonzero_command_indices = np.flatnonzero(np.abs(capture.command) > 1.0e-9)
+            self.assertGreater(nonzero_command_indices.size, 0)
+            self.assertGreater(int(nonzero_command_indices[0]), int(np.flatnonzero(hold_start_mask)[-1]))
 
     def test_rerun_recorder_logs_quality_and_conclusion_paths(self) -> None:
         logged_paths: list[str] = []
@@ -1174,6 +1764,7 @@ excitation:
                 Blueprint=lambda *args, **kwargs: ("Blueprint", args, kwargs),
             ),
         )
+        command_packet = SingleMotorCommandAdapter(motor_count=7).pack(2, 1.25)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch("friction_identification_core.visualization.rr", fake_rr):
@@ -1188,6 +1779,7 @@ excitation:
                     active_motor_id=2,
                     sent_commands=np.asarray([0.0, 1.25, 0.0], dtype=np.float64),
                     expected_velocities=np.asarray([0.0, 0.3, 0.0], dtype=np.float64),
+                    raw_packet=command_packet,
                 )
                 recorder.log_live_motor_sample(
                     group_index=1,
@@ -1210,6 +1802,8 @@ excitation:
         self.assertIn("/live/motors/motor_01/status", blueprint_text)
         self.assertIn("Expected vs Actual Velocity", blueprint_text)
         self.assertIn("/live/motors/motor_02/signals/velocity_error", blueprint_text)
+        self.assertIn("/live/overview/sent_torque_parameters", blueprint_text)
+        self.assertIn("/live/overview/raw_command_packet", blueprint_text)
         self.assertNotIn("/live/overview/current_state", blueprint_text)
         self.assertNotIn("/summary/", blueprint_text)
 
@@ -1267,6 +1861,22 @@ excitation:
         self.assertIn(
             "- velocity_error: `-0.100000`",
             str(latest_payload_by_path["live/motors/motor_02/status"]["text"]),
+        )
+        self.assertIn(
+            "active_motor: `M02 motor_02`",
+            str(latest_payload_by_path["live/overview/sent_torque_parameters"]["text"]),
+        )
+        self.assertIn(
+            "| M02 motor_02 | 1.250000 | 0.300000 | 0.200000 | 0.750000 | 0.500000 | steady_forward_01 |",
+            str(latest_payload_by_path["live/overview/sent_torque_parameters"]["text"]),
+        )
+        self.assertIn(
+            "packet_size_bytes: `33`",
+            str(latest_payload_by_path["live/overview/raw_command_packet"]["text"]),
+        )
+        self.assertIn(
+            command_packet.hex(" ").upper(),
+            str(latest_payload_by_path["live/overview/raw_command_packet"]["text"]),
         )
 
 

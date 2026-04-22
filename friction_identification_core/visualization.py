@@ -42,6 +42,7 @@ class RerunRecorder:
         self._live_state = ["-"] * motor_count
         self._live_temperature = np.full(motor_count, np.nan, dtype=np.float64)
         self._live_phase = ["-"] * motor_count
+        self._latest_raw_command_packet = b""
         self._latest_context = {
             "group_index": 0,
             "round_index": 0,
@@ -74,6 +75,7 @@ class RerunRecorder:
                         "- `live/motors/motor_xx/signals/torque`: sent command and torque feedback",
                         "- `live/motors/motor_xx/signals/torque_error`: sent minus feedback torque",
                         "- `live/motors/motor_xx/identification/summary`: latest parameters or identification result",
+                        "- `live/overview/raw_command_packet`: latest packed UART command frame",
                         "- `rounds/*`: round-level detail is still recorded for later drill-down",
                     ]
                 ),
@@ -83,6 +85,14 @@ class RerunRecorder:
         self._recording.log(
             "live/overview/current_state",
             rr.TextDocument(self._build_current_state_markdown(), media_type="text/markdown"),
+        )
+        self._recording.log(
+            "live/overview/sent_torque_parameters",
+            rr.TextDocument(self._build_sent_torque_parameters_markdown(), media_type="text/markdown"),
+        )
+        self._recording.log(
+            "live/overview/raw_command_packet",
+            rr.TextDocument(self._build_raw_command_packet_markdown(), media_type="text/markdown"),
         )
         for motor_id in self._motor_ids:
             self._recording.log(
@@ -161,6 +171,24 @@ class RerunRecorder:
             )
             for motor_id in self._motor_ids
         ]
+        by_motor_tabs.append(
+            rrb.Vertical(
+                rrb.TextDocumentView(
+                    origin="/live/overview/sent_torque_parameters",
+                    name="Sent Torque Parameters",
+                ),
+                name="Torque Parameters",
+            )
+        )
+        by_motor_tabs.append(
+            rrb.Vertical(
+                rrb.TextDocumentView(
+                    origin="/live/overview/raw_command_packet",
+                    name="Raw Command Packet",
+                ),
+                name="Raw Packet",
+            )
+        )
 
         blueprint = rrb.Blueprint(rrb.Tabs(*by_motor_tabs), auto_views=False)
         self._recording.send_blueprint(blueprint, make_active=True, make_default=True)
@@ -179,6 +207,11 @@ class RerunRecorder:
 
     def _current_velocity_error(self, index: int) -> float:
         return float(self._live_velocity[index]) - float(self._live_expected_velocity[index])
+
+    def _format_bytes_hex(self, payload: bytes) -> str:
+        if not payload:
+            return "-"
+        return bytes(payload).hex(" ").upper()
 
     def _build_current_state_markdown(self) -> str:
         context = self._latest_context
@@ -260,6 +293,64 @@ class RerunRecorder:
                 ]
             )
         return "\n".join(lines)
+
+    def _build_sent_torque_parameters_markdown(self) -> str:
+        context = self._latest_context
+        active_motor_id = int(context["active_motor_id"])
+        active_motor = "-" if active_motor_id not in self._motor_index else self._motor_label(active_motor_id)
+        lines = [
+            "# Sent Torque Parameters",
+            "",
+            f"- mode: `{self._mode}`",
+            f"- active_group: `{int(context['group_index'])}`",
+            f"- active_round: `{int(context['round_index'])}`",
+            f"- active_motor_id: `{active_motor_id}`",
+            f"- active_motor: `{active_motor}`",
+            "",
+            "| motor | sent_command | expected_velocity | actual_velocity | feedback_torque | torque_error | phase |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+        for motor_id in self._motor_ids:
+            index = self._motor_index[motor_id]
+            lines.append(
+                "| "
+                f"{self._motor_label(motor_id)} | "
+                f"{self._format_float(self._live_target_torque[index])} | "
+                f"{self._format_float(self._live_expected_velocity[index])} | "
+                f"{self._format_float(self._live_velocity[index])} | "
+                f"{self._format_float(self._live_feedback_torque[index])} | "
+                f"{self._format_float(self._current_torque_error(index))} | "
+                f"{self._live_phase[index]} |"
+            )
+        return "\n".join(lines)
+
+    def _build_raw_command_packet_markdown(self) -> str:
+        context = self._latest_context
+        active_motor_id = int(context["active_motor_id"])
+        active_motor = "-" if active_motor_id not in self._motor_index else self._motor_label(active_motor_id)
+        packet = bytes(self._latest_raw_command_packet)
+        checksum = "-" if len(packet) < 3 else f"0x{packet[-3]:02X}"
+        frame_head = "-" if len(packet) < 2 else self._format_bytes_hex(packet[:2])
+        frame_tail = "-" if len(packet) < 2 else self._format_bytes_hex(packet[-2:])
+        return "\n".join(
+            [
+                "# Raw Command Packet",
+                "",
+                f"- mode: `{self._mode}`",
+                f"- active_group: `{int(context['group_index'])}`",
+                f"- active_round: `{int(context['round_index'])}`",
+                f"- active_motor_id: `{active_motor_id}`",
+                f"- active_motor: `{active_motor}`",
+                f"- packet_size_bytes: `{len(packet)}`",
+                f"- frame_head: `{frame_head}`",
+                f"- checksum: `{checksum}`",
+                f"- frame_tail: `{frame_tail}`",
+                "",
+                "```text",
+                self._format_bytes_hex(packet),
+                "```",
+            ]
+        )
 
     def _build_identification_summary_lines(
         self,
@@ -445,6 +536,14 @@ class RerunRecorder:
             "live/overview/current_state",
             rr.TextDocument(self._build_current_state_markdown(), media_type="text/markdown"),
         )
+        self._recording.log(
+            "live/overview/sent_torque_parameters",
+            rr.TextDocument(self._build_sent_torque_parameters_markdown(), media_type="text/markdown"),
+        )
+        self._recording.log(
+            "live/overview/raw_command_packet",
+            rr.TextDocument(self._build_raw_command_packet_markdown(), media_type="text/markdown"),
+        )
         self._log_live_motor_documents(motor_id)
 
     def log_round_timing(
@@ -475,6 +574,14 @@ class RerunRecorder:
             "live/overview/current_state",
             rr.TextDocument(self._build_current_state_markdown(), media_type="text/markdown"),
         )
+        self._recording.log(
+            "live/overview/sent_torque_parameters",
+            rr.TextDocument(self._build_sent_torque_parameters_markdown(), media_type="text/markdown"),
+        )
+        self._recording.log(
+            "live/overview/raw_command_packet",
+            rr.TextDocument(self._build_raw_command_packet_markdown(), media_type="text/markdown"),
+        )
         for motor_id in self._motor_ids:
             self._log_live_motor_documents(int(motor_id))
 
@@ -486,6 +593,7 @@ class RerunRecorder:
         active_motor_id: int,
         sent_commands: np.ndarray,
         expected_velocities: np.ndarray,
+        raw_packet: bytes | None = None,
     ) -> None:
         if self._recording is None:
             return
@@ -499,6 +607,8 @@ class RerunRecorder:
         }
         self._live_target_torque[:] = sent_commands_array
         self._live_expected_velocity[:] = expected_velocity_array
+        if raw_packet is not None:
+            self._latest_raw_command_packet = bytes(raw_packet)
         self._ensure_live_series()
         for motor_id in self._motor_ids:
             self._ensure_live_motor_series(int(motor_id))
@@ -528,6 +638,14 @@ class RerunRecorder:
         self._recording.log(
             "live/overview/current_state",
             rr.TextDocument(self._build_current_state_markdown(), media_type="text/markdown"),
+        )
+        self._recording.log(
+            "live/overview/sent_torque_parameters",
+            rr.TextDocument(self._build_sent_torque_parameters_markdown(), media_type="text/markdown"),
+        )
+        self._recording.log(
+            "live/overview/raw_command_packet",
+            rr.TextDocument(self._build_raw_command_packet_markdown(), media_type="text/markdown"),
         )
 
     def _ensure_round_series(self, round_root: str) -> None:

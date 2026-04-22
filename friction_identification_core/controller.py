@@ -20,11 +20,12 @@ class SingleMotorController:
         compensation: MotorCompensationParameters | None = None,
     ) -> tuple[float, float]:
         index = self._config.motor_index(motor_id)
-        max_velocity = float(self._config.control.max_velocity[index])
         max_torque = float(self._config.control.max_torque[index])
-        velocity_error = float(reference.velocity_cmd) - float(feedback.velocity)
-        feedback_command = max_torque * velocity_error / max(max_velocity, 1.0e-9)
-        feedforward = 0.0 if compensation is None else compensation.feedforward_torque(float(reference.velocity_cmd))
-        raw_command = feedback_command + feedforward
+        if compensation is None:
+            velocity_p_gain = float(self._config.control.velocity_p_gain[index])
+            velocity_error = float(reference.velocity_cmd) - float(feedback.velocity)
+            raw_command = velocity_p_gain * velocity_error
+        else:
+            raw_command = compensation.feedforward_torque(float(feedback.velocity))
         limited_command = float(np.clip(raw_command, -max_torque, max_torque))
         return float(raw_command), limited_command

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -19,9 +21,6 @@ from friction_identification_core.transport import SerialTransport, open_serial_
 from friction_identification_core.visualization import RerunRecorder
 
 
-DEFAULT_COMPENSATION_SUMMARY = Path("results") / "hardware_identification_summary.npz"
-
-
 @dataclass(frozen=True)
 class SequentialRunResult:
     artifacts: tuple[RoundArtifact, ...]
@@ -29,8 +28,123 @@ class SequentialRunResult:
     manifest_path: Path
 
 
-def _default_compensation_summary_path(config: Config) -> Path:
-    return (config.project_root / DEFAULT_COMPENSATION_SUMMARY).resolve()
+@dataclass(frozen=True)
+class _AbortEvent:
+    reason: str
+    motor_id: int
+    group_index: int
+    round_index: int
+    phase_name: str
+    observed_velocity: float | None = None
+    velocity_limit: float | None = None
+    feedback_torque: float | None = None
+    torque_limit: float | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "reason": str(self.reason),
+            "motor_id": int(self.motor_id),
+            "group_index": int(self.group_index),
+            "round_index": int(self.round_index),
+            "phase_name": str(self.phase_name),
+        }
+        if self.observed_velocity is not None:
+            payload["observed_velocity"] = float(self.observed_velocity)
+        if self.velocity_limit is not None:
+            payload["velocity_limit"] = float(self.velocity_limit)
+        if self.feedback_torque is not None:
+            payload["feedback_torque"] = float(self.feedback_torque)
+        if self.torque_limit is not None:
+            payload["torque_limit"] = float(self.torque_limit)
+        return payload
+
+    def error_message(self) -> str:
+        parts = [
+            f"reason={self.reason}",
+            f"motor_id={self.motor_id}",
+            f"group_index={self.group_index}",
+            f"round_index={self.round_index}",
+            f"phase_name={self.phase_name}",
+        ]
+        if self.observed_velocity is not None:
+            parts.append(f"observed_velocity={self.observed_velocity:.6f}")
+        if self.velocity_limit is not None:
+            parts.append(f"velocity_limit={self.velocity_limit:.6f}")
+        if self.feedback_torque is not None:
+            parts.append(f"feedback_torque={self.feedback_torque:.6f}")
+        if self.torque_limit is not None:
+            parts.append(f"torque_limit={self.torque_limit:.6f}")
+        return "Runtime safety abort: " + ", ".join(parts)
+
+
+class _SafetyAbortError(ValueError):
+    def __init__(self, event: _AbortEvent) -> None:
+        self.event = event
+        super().__init__(event.error_message())
+
+
+def _root_compensation_summary_path(config: Config) -> Path:
+    return (config.results_dir / config.output.summary_filename).resolve()
+
+
+def _latest_identify_summary_path(config: Config) -> Path | None:
+    runs_dir = config.results_dir / "runs"
+    if not runs_dir.exists():
+        return None
+
+    candidates: list[tuple[datetime, str, Path]] = []
+    for manifest_path in runs_dir.glob("*_identify/run_manifest.json"):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+
+        if str(manifest.get("mode", "")) != "identify":
+            continue
+
+        end_time_raw = manifest.get("end_time")
+        if not end_time_raw:
+            continue
+
+        summary_files = manifest.get("summary_files")
+        if not isinstance(summary_files, dict):
+            continue
+        summary_path_raw = summary_files.get("run_summary_path")
+        if not summary_path_raw:
+            continue
+
+        try:
+            end_time = datetime.fromisoformat(str(end_time_raw))
+        except ValueError:
+            continue
+
+        summary_path = Path(summary_path_raw).resolve()
+        if not summary_path.exists():
+            continue
+
+        run_label = str(manifest.get("run_label") or manifest_path.parent.name)
+        candidates.append((end_time, run_label, summary_path))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
+
+
+def _resolve_compensation_summary_path(
+    config: Config,
+    *,
+    parameters_path: Path | None = None,
+) -> tuple[Path, str]:
+    if parameters_path is not None:
+        return Path(parameters_path).resolve(), "explicit parameters_path"
+
+    latest_summary_path = _latest_identify_summary_path(config)
+    if latest_summary_path is not None:
+        return latest_summary_path, "latest identify run summary"
+
+    return _root_compensation_summary_path(config), "root snapshot summary"
 
 
 def _expected_velocity_vector(config: Config, *, target_index: int, target_velocity: float) -> np.ndarray:
@@ -64,12 +178,81 @@ def _capture_compensation_metrics(capture: RoundCapture) -> dict[str, float]:
     }
 
 
+def _phase_velocity_limit(
+    config: Config,
+    *,
+    phase_name: str,
+    reference_velocity: float,
+    target_max_velocity: float,
+) -> float:
+    phase_name = str(phase_name)
+    if phase_name.startswith("hold_"):
+        return 0.0
+    if phase_name.startswith("transition_"):
+        return abs(float(reference_velocity))
+    if phase_name.startswith("settle_") or phase_name.startswith("steady_"):
+        try:
+            platform_index = int(phase_name.rsplit("_", 1)[-1]) - 1
+        except ValueError:
+            return abs(float(reference_velocity))
+        if 0 <= platform_index < len(config.excitation.platforms):
+            return abs(float(config.excitation.platforms[platform_index].resolve_speed(max_velocity=target_max_velocity)))
+    return abs(float(reference_velocity))
+
+
+def _build_abort_event(
+    config: Config,
+    *,
+    frame,
+    reference_velocity: float,
+    phase_name: str,
+    target_motor_id: int,
+    group_index: int,
+    round_index: int,
+    target_max_velocity: float,
+    target_max_torque: float,
+) -> _AbortEvent | None:
+    velocity_limit = _phase_velocity_limit(
+        config,
+        phase_name=phase_name,
+        reference_velocity=reference_velocity,
+        target_max_velocity=target_max_velocity,
+    )
+    velocity_threshold = float(config.identification.zero_velocity_threshold)
+    if abs(float(frame.velocity)) > velocity_limit + velocity_threshold:
+        return _AbortEvent(
+            reason="velocity_limit_exceeded",
+            motor_id=int(target_motor_id),
+            group_index=int(group_index),
+            round_index=int(round_index),
+            phase_name=str(phase_name),
+            observed_velocity=float(frame.velocity),
+            velocity_limit=float(velocity_limit),
+        )
+
+    torque_epsilon = float(np.finfo(np.float32).eps * max(abs(float(target_max_torque)), 1.0))
+    if abs(float(frame.torque)) > float(target_max_torque) + torque_epsilon:
+        return _AbortEvent(
+            reason="torque_limit_exceeded",
+            motor_id=int(target_motor_id),
+            group_index=int(group_index),
+            round_index=int(round_index),
+            phase_name=str(phase_name),
+            feedback_torque=float(frame.torque),
+            torque_limit=float(target_max_torque),
+        )
+    return None
+
+
 def _load_compensation_parameters(
     config: Config,
     *,
     parameters_path: Path | None = None,
-) -> tuple[Path, dict[int, MotorCompensationParameters]]:
-    resolved_path = _default_compensation_summary_path(config) if parameters_path is None else Path(parameters_path).resolve()
+) -> tuple[Path, str, dict[int, MotorCompensationParameters]]:
+    resolved_path, source_label = _resolve_compensation_summary_path(
+        config,
+        parameters_path=parameters_path,
+    )
     if not resolved_path.exists():
         raise ValueError(f"Compensation summary file not found: {resolved_path}")
 
@@ -135,7 +318,7 @@ def _load_compensation_parameters(
     if problems:
         raise ValueError("Compensation parameters are unavailable for selected motors (" + "; ".join(problems) + ").")
 
-    return resolved_path, parameters_by_motor
+    return resolved_path, source_label, parameters_by_motor
 
 
 def _capture_round(
@@ -190,6 +373,7 @@ def _capture_round(
     capture_started_monotonic: float | None = None
     target_sync_frame_count = 0
     current_target_command = 0.0
+    abort_event: _AbortEvent | None = None
 
     rerun_recorder.log_round_timing(
         group_index=int(group_index),
@@ -201,7 +385,7 @@ def _capture_round(
         round_total_duration_s=0.0,
     )
 
-    def _log_live_command(target_command: float, target_velocity: float) -> None:
+    def _log_live_command(target_command: float, target_velocity: float, raw_packet: bytes) -> None:
         rerun_recorder.log_live_command_packet(
             group_index=int(group_index),
             round_index=int(round_index),
@@ -212,6 +396,7 @@ def _capture_round(
                 target_index=target_index,
                 target_velocity=target_velocity,
             ),
+            raw_packet=raw_packet,
         )
 
     def _start_capture() -> None:
@@ -257,8 +442,9 @@ def _capture_round(
                     if frame.motor_id == target_motor_id:
                         target_sync_frame_count += 1
                         current_target_command = 0.0
-                        transport.write(command_adapter.pack(target_motor_id, 0.0))
-                        _log_live_command(0.0, 0.0)
+                        command_packet = command_adapter.pack(target_motor_id, 0.0)
+                        transport.write(command_packet)
+                        _log_live_command(0.0, 0.0, command_packet)
                     rerun_recorder.log_live_motor_sample(
                         group_index=int(group_index),
                         round_index=int(round_index),
@@ -297,15 +483,33 @@ def _capture_round(
                 phase_name = str(reference_sample.phase_name) if frame.motor_id == target_motor_id else "idle"
 
                 if frame.motor_id == target_motor_id:
-                    command_raw, command_limited = controller.update(
-                        target_motor_id,
-                        reference_sample,
-                        frame,
-                        compensation=compensation,
+                    abort_event = _build_abort_event(
+                        config,
+                        frame=frame,
+                        reference_velocity=float(reference_sample.velocity_cmd),
+                        phase_name=str(reference_sample.phase_name),
+                        target_motor_id=int(target_motor_id),
+                        group_index=int(group_index),
+                        round_index=int(round_index),
+                        target_max_velocity=target_max_velocity,
+                        target_max_torque=target_max_torque,
                     )
-                    current_target_command = command_adapter.limit_command(target_motor_id, command_limited)
-                    transport.write(command_adapter.pack(target_motor_id, current_target_command))
-                    _log_live_command(current_target_command, float(reference_sample.velocity_cmd))
+                    if abort_event is not None:
+                        raise _SafetyAbortError(abort_event)
+                    if reference_sample.phase_name == "hold_start":
+                        command_raw = 0.0
+                        current_target_command = 0.0
+                    else:
+                        command_raw, command_limited = controller.update(
+                            target_motor_id,
+                            reference_sample,
+                            frame,
+                            compensation=compensation,
+                        )
+                        current_target_command = command_adapter.limit_command(target_motor_id, command_limited)
+                    command_packet = command_adapter.pack(target_motor_id, current_target_command)
+                    transport.write(command_packet)
+                    _log_live_command(current_target_command, float(reference_sample.velocity_cmd), command_packet)
                     target_frame_count += 1
 
                     time_log.append(float(elapsed_s))
@@ -371,13 +575,18 @@ def _capture_round(
     except KeyboardInterrupt:
         interrupted = True
     finally:
-        transport.write(command_adapter.pack(target_motor_id, 0.0))
-        _log_live_command(0.0, 0.0)
+        command_packet = command_adapter.pack(target_motor_id, 0.0)
+        transport.write(command_packet)
+        _log_live_command(0.0, 0.0, command_packet)
         rerun_recorder.log_round_stop(
             group_index=int(group_index),
             round_index=int(round_index),
             motor_id=int(target_motor_id),
-            phase_name="interrupted" if interrupted else "round_complete",
+            phase_name=(
+                "interrupted"
+                if interrupted
+                else ("aborted" if abort_event is not None else "round_complete")
+            ),
         )
 
     actual_capture_duration_s = 0.0
@@ -536,6 +745,17 @@ def run_sequential_identification(
             summary_paths=summary_paths,
             manifest_path=store.manifest_path,
         )
+    except _SafetyAbortError as exc:
+        store.record_abort_event(exc.event.to_payload())
+        if artifacts:
+            summary_paths = store.save_summary(artifacts)
+            rerun_recorder.log_summary(
+                summary_path=summary_paths.run_summary_path,
+                report_path=summary_paths.run_summary_report_path,
+            )
+        else:
+            store.finalize()
+        raise
     finally:
         rerun_recorder.close()
         transport.close()
@@ -548,9 +768,13 @@ def run_compensation_validation(
     show_rerun_viewer: bool = False,
     parameters_path: Path | None = None,
 ) -> SequentialRunResult:
-    resolved_parameters_path, parameters_by_motor = _load_compensation_parameters(
+    resolved_parameters_path, parameters_source, parameters_by_motor = _load_compensation_parameters(
         config,
         parameters_path=parameters_path,
+    )
+    log_info(
+        "Compensation parameters source: "
+        f"{parameters_source} ({resolved_parameters_path})"
     )
     store = ResultStore(config, mode="compensate")
     parser = SerialFrameParser(max_motor_id=max(config.motor_ids))
@@ -639,6 +863,10 @@ def run_compensation_validation(
             summary_paths=None,
             manifest_path=store.manifest_path,
         )
+    except _SafetyAbortError as exc:
+        store.record_abort_event(exc.event.to_payload())
+        store.finalize(compensation_parameters_path=resolved_parameters_path)
+        raise
     finally:
         rerun_recorder.close()
         transport.close()
