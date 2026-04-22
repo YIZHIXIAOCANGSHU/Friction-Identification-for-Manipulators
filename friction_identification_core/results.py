@@ -17,9 +17,9 @@ from friction_identification_core.runtime import ensure_directory, filesystem_ti
 @dataclass(frozen=True)
 class RoundArtifact:
     capture: RoundCapture
-    identification: MotorIdentificationResult
+    identification: MotorIdentificationResult | None
     capture_path: Path
-    identification_path: Path
+    identification_path: Path | None
 
 
 @dataclass(frozen=True)
@@ -123,17 +123,18 @@ def _worst_conclusion(values: list[str]) -> str:
 
 
 class ResultStore:
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, mode: str) -> None:
         self._config = config
+        self._mode = str(mode)
         self.results_dir = ensure_directory(config.results_dir)
-        self.run_label = f"{filesystem_timestamp()}_sequential"
+        self.run_label = f"{filesystem_timestamp()}_{self._mode}"
         self.run_dir = ensure_directory(self.results_dir / "runs" / self.run_label)
         self.summary_dir = ensure_directory(self.run_dir / "summary")
-        self.rerun_recording_path = self.run_dir / "sequential_identification.rrd"
+        self.rerun_recording_path = self.run_dir / f"{self._mode}.rrd"
         self.manifest_path = self.run_dir / "run_manifest.json"
         self._manifest: dict[str, Any] = {
             "run_label": self.run_label,
-            "mode": "sequential",
+            "mode": self._mode,
             "start_time": utc_now_iso8601(),
             "end_time": None,
             "group_count": int(config.group_count),
@@ -148,6 +149,12 @@ class ResultStore:
 
     def _write_manifest(self) -> None:
         write_json(self.manifest_path, self._manifest)
+
+    def finalize(self, *, compensation_parameters_path: Path | None = None) -> None:
+        self._manifest["end_time"] = utc_now_iso8601()
+        if compensation_parameters_path is not None:
+            self._manifest["compensation_parameters_path"] = str(compensation_parameters_path)
+        self._write_manifest()
 
     def _motor_dir(self, group_index: int, motor_id: int) -> Path:
         return ensure_directory(self.run_dir / f"group_{int(group_index):02d}" / f"motor_{int(motor_id):02d}")
@@ -220,6 +227,9 @@ class ResultStore:
         sequence_error_ratio = np.full(len(motor_ids), np.nan, dtype=np.float64)
         target_frame_count = np.zeros(len(motor_ids), dtype=np.int64)
         target_frame_ratio = np.full(len(motor_ids), np.nan, dtype=np.float64)
+        planned_duration_s = np.full(len(motor_ids), np.nan, dtype=np.float64)
+        actual_capture_duration_s = np.full(len(motor_ids), np.nan, dtype=np.float64)
+        round_total_duration_s = np.full(len(motor_ids), np.nan, dtype=np.float64)
         synced_before_capture = np.zeros(len(motor_ids), dtype=bool)
         coulomb_std = np.full(len(motor_ids), np.nan, dtype=np.float64)
         viscous_std = np.full(len(motor_ids), np.nan, dtype=np.float64)
@@ -241,53 +251,93 @@ class ResultStore:
 
         for index, motor_id in enumerate(motor_ids):
             motor_artifacts = [artifact for artifact in artifacts if artifact.capture.target_motor_id == motor_id]
+            identified_artifacts = [artifact for artifact in motor_artifacts if artifact.identification is not None]
             round_count[index] = len(motor_artifacts)
             history[str(motor_id)] = [
                 {
                     "group_index": artifact.capture.group_index,
                     "round_index": artifact.capture.round_index,
-                    "identified": bool(artifact.identification.identified),
-                    "coulomb": float(artifact.identification.coulomb),
-                    "viscous": float(artifact.identification.viscous),
-                    "offset": float(artifact.identification.offset),
-                    "velocity_scale": float(artifact.identification.velocity_scale),
-                    "valid_rmse": float(artifact.identification.valid_rmse),
-                    "valid_r2": float(artifact.identification.valid_r2),
-                    "sample_count": int(artifact.identification.sample_count),
-                    "valid_sample_ratio": float(artifact.identification.valid_sample_ratio),
-                    "status": str(artifact.identification.metadata.get("status", "unknown")),
+                    "identified": bool(artifact.identification is not None and artifact.identification.identified),
+                    "coulomb": float(np.nan if artifact.identification is None else artifact.identification.coulomb),
+                    "viscous": float(np.nan if artifact.identification is None else artifact.identification.viscous),
+                    "offset": float(np.nan if artifact.identification is None else artifact.identification.offset),
+                    "velocity_scale": float(
+                        np.nan if artifact.identification is None else artifact.identification.velocity_scale
+                    ),
+                    "valid_rmse": float(np.nan if artifact.identification is None else artifact.identification.valid_rmse),
+                    "valid_r2": float(np.nan if artifact.identification is None else artifact.identification.valid_r2),
+                    "sample_count": int(0 if artifact.identification is None else artifact.identification.sample_count),
+                    "valid_sample_ratio": float(
+                        np.nan if artifact.identification is None else artifact.identification.valid_sample_ratio
+                    ),
+                    "status": str(
+                        "not_run"
+                        if artifact.identification is None
+                        else artifact.identification.metadata.get("status", "unknown")
+                    ),
                     "sequence_error_count": int(artifact.capture.metadata.get("sequence_error_count", 0)),
                     "sequence_error_ratio": float(artifact.capture.metadata.get("sequence_error_ratio", 0.0)),
                     "target_frame_count": int(artifact.capture.metadata.get("target_frame_count", artifact.capture.sample_count)),
                     "target_frame_ratio": float(artifact.capture.metadata.get("target_frame_ratio", 0.0)),
-                    "synced_before_capture": bool(artifact.capture.metadata.get("synced_before_capture", False)),
-                    "validation_mode": str(artifact.identification.metadata.get("validation_mode", "")),
-                    "validation_reason": str(artifact.identification.metadata.get("validation_reason", "")),
-                    "train_platforms": list(artifact.identification.metadata.get("train_platforms", [])),
-                    "valid_platforms": list(artifact.identification.metadata.get("valid_platforms", [])),
-                    "recommended_for_runtime": bool(
-                        artifact.identification.metadata.get("recommended_for_runtime", False)
+                    "planned_duration_s": float(artifact.capture.metadata.get("planned_duration_s", np.nan)),
+                    "actual_capture_duration_s": float(
+                        artifact.capture.metadata.get("actual_capture_duration_s", np.nan)
                     ),
-                    "conclusion_level": str(artifact.identification.metadata.get("conclusion_level", "reject")),
-                    "conclusion_text": str(artifact.identification.metadata.get("conclusion_text", "")),
-                    "saturation_ratio": float(artifact.identification.metadata.get("saturation_ratio", np.nan)),
+                    "round_total_duration_s": float(artifact.capture.metadata.get("round_total_duration_s", np.nan)),
+                    "synced_before_capture": bool(artifact.capture.metadata.get("synced_before_capture", False)),
+                    "validation_mode": str(
+                        "" if artifact.identification is None else artifact.identification.metadata.get("validation_mode", "")
+                    ),
+                    "validation_reason": str(
+                        ""
+                        if artifact.identification is None
+                        else artifact.identification.metadata.get("validation_reason", "")
+                    ),
+                    "train_platforms": list(
+                        [] if artifact.identification is None else artifact.identification.metadata.get("train_platforms", [])
+                    ),
+                    "valid_platforms": list(
+                        [] if artifact.identification is None else artifact.identification.metadata.get("valid_platforms", [])
+                    ),
+                    "recommended_for_runtime": bool(
+                        False
+                        if artifact.identification is None
+                        else artifact.identification.metadata.get("recommended_for_runtime", False)
+                    ),
+                    "conclusion_level": str(
+                        "not_run"
+                        if artifact.identification is None
+                        else artifact.identification.metadata.get("conclusion_level", "reject")
+                    ),
+                    "conclusion_text": str(
+                        "" if artifact.identification is None else artifact.identification.metadata.get("conclusion_text", "")
+                    ),
+                    "saturation_ratio": float(
+                        np.nan if artifact.identification is None else artifact.identification.metadata.get("saturation_ratio", np.nan)
+                    ),
                     "tracking_error_ratio": float(
-                        artifact.identification.metadata.get("tracking_error_ratio", np.nan)
+                        np.nan
+                        if artifact.identification is None
+                        else artifact.identification.metadata.get("tracking_error_ratio", np.nan)
                     ),
                     "high_speed_platform_count": int(
-                        artifact.identification.metadata.get("high_speed_platform_count", 0)
+                        0 if artifact.identification is None else artifact.identification.metadata.get("high_speed_platform_count", 0)
                     ),
                     "high_speed_valid_rmse": float(
-                        artifact.identification.metadata.get("high_speed_valid_rmse", np.nan)
+                        np.nan
+                        if artifact.identification is None
+                        else artifact.identification.metadata.get("high_speed_valid_rmse", np.nan)
                     ),
-                    "dropped_platforms": list(artifact.identification.metadata.get("dropped_platforms", [])),
+                    "dropped_platforms": list(
+                        [] if artifact.identification is None else artifact.identification.metadata.get("dropped_platforms", [])
+                    ),
                     "capture_path": str(artifact.capture_path),
-                    "identification_path": str(artifact.identification_path),
+                    "identification_path": "-" if artifact.identification_path is None else str(artifact.identification_path),
                 }
                 for artifact in motor_artifacts
             ]
 
-            identified = [artifact.identification for artifact in motor_artifacts if artifact.identification.identified]
+            identified = [artifact.identification for artifact in identified_artifacts if artifact.identification.identified]
             identified_mask[index] = bool(identified)
             if identified:
                 coulomb_values = [float(item.coulomb) for item in identified]
@@ -325,48 +375,90 @@ class ResultStore:
             target_frame_ratio[index] = _finite_mean(
                 [float(item.capture.metadata.get("target_frame_ratio", np.nan)) for item in motor_artifacts]
             )
+            planned_duration_s[index] = _finite_mean(
+                [float(item.capture.metadata.get("planned_duration_s", np.nan)) for item in motor_artifacts]
+            )
+            actual_capture_duration_s[index] = _finite_mean(
+                [float(item.capture.metadata.get("actual_capture_duration_s", np.nan)) for item in motor_artifacts]
+            )
+            round_total_duration_s[index] = _finite_mean(
+                [float(item.capture.metadata.get("round_total_duration_s", np.nan)) for item in motor_artifacts]
+            )
             synced_before_capture[index] = bool(motor_artifacts) and all(
                 bool(item.capture.metadata.get("synced_before_capture", False)) for item in motor_artifacts
             )
-            status[index] = _unique_strings_join(
-                [str(item.identification.metadata.get("status", "unknown")) for item in motor_artifacts]
-            )
-            validation_mode[index] = _unique_strings_join(
-                [str(item.identification.metadata.get("validation_mode", "")) for item in motor_artifacts]
-            )
-            validation_reason[index] = _unique_strings_join(
-                [str(item.identification.metadata.get("validation_reason", "")) for item in motor_artifacts]
-            )
-            train_platforms[index] = _unique_strings_join(
-                [",".join(item.identification.metadata.get("train_platforms", [])) for item in motor_artifacts]
-            )
-            valid_platforms[index] = _unique_strings_join(
-                [",".join(item.identification.metadata.get("valid_platforms", [])) for item in motor_artifacts]
-            )
+            status[index] = _unique_strings_join([
+                str(item.identification.metadata.get("status", "unknown"))
+                for item in identified_artifacts
+                if item.identification is not None
+            ])
+            validation_mode[index] = _unique_strings_join([
+                str(item.identification.metadata.get("validation_mode", ""))
+                for item in identified_artifacts
+                if item.identification is not None
+            ])
+            validation_reason[index] = _unique_strings_join([
+                str(item.identification.metadata.get("validation_reason", ""))
+                for item in identified_artifacts
+                if item.identification is not None
+            ])
+            train_platforms[index] = _unique_strings_join([
+                ",".join(item.identification.metadata.get("train_platforms", []))
+                for item in identified_artifacts
+                if item.identification is not None
+            ])
+            valid_platforms[index] = _unique_strings_join([
+                ",".join(item.identification.metadata.get("valid_platforms", []))
+                for item in identified_artifacts
+                if item.identification is not None
+            ])
             conclusion_level_values = [
                 str(item.identification.metadata.get("conclusion_level", "reject")) for item in motor_artifacts
+                if item.identification is not None
             ]
             conclusion_level[index] = _worst_conclusion(conclusion_level_values)
-            recommended_for_runtime[index] = bool(motor_artifacts) and all(
-                bool(item.identification.metadata.get("recommended_for_runtime", False)) for item in motor_artifacts
+            recommended_for_runtime[index] = bool(identified_artifacts) and all(
+                bool(item.identification.metadata.get("recommended_for_runtime", False))
+                for item in identified_artifacts
+                if item.identification is not None
             )
             conclusion_text[index] = _unique_strings_join(
-                [str(item.identification.metadata.get("conclusion_text", "")) for item in motor_artifacts]
+                [
+                    str(item.identification.metadata.get("conclusion_text", ""))
+                    for item in identified_artifacts
+                    if item.identification is not None
+                ]
             ) or "-"
             saturation_ratio[index] = _finite_max(
-                [float(item.identification.metadata.get("saturation_ratio", np.nan)) for item in motor_artifacts]
+                [
+                    float(item.identification.metadata.get("saturation_ratio", np.nan))
+                    for item in identified_artifacts
+                    if item.identification is not None
+                ]
             )
             tracking_error_ratio[index] = _finite_max(
-                [float(item.identification.metadata.get("tracking_error_ratio", np.nan)) for item in motor_artifacts]
+                [
+                    float(item.identification.metadata.get("tracking_error_ratio", np.nan))
+                    for item in identified_artifacts
+                    if item.identification is not None
+                ]
             )
             min_high_speed_count = _finite_min(
-                [float(item.identification.metadata.get("high_speed_platform_count", np.nan)) for item in motor_artifacts]
+                [
+                    float(item.identification.metadata.get("high_speed_platform_count", np.nan))
+                    for item in identified_artifacts
+                    if item.identification is not None
+                ]
             )
             high_speed_platform_count[index] = (
                 0 if not np.isfinite(min_high_speed_count) else int(round(min_high_speed_count))
             )
             high_speed_valid_rmse[index] = _finite_max(
-                [float(item.identification.metadata.get("high_speed_valid_rmse", np.nan)) for item in motor_artifacts]
+                [
+                    float(item.identification.metadata.get("high_speed_valid_rmse", np.nan))
+                    for item in identified_artifacts
+                    if item.identification is not None
+                ]
             )
 
         summary_payload = {
@@ -386,6 +478,9 @@ class ResultStore:
             "sequence_error_ratio": sequence_error_ratio,
             "target_frame_count": target_frame_count,
             "target_frame_ratio": target_frame_ratio,
+            "planned_duration_s": planned_duration_s,
+            "actual_capture_duration_s": actual_capture_duration_s,
+            "round_total_duration_s": round_total_duration_s,
             "synced_before_capture": synced_before_capture,
             "validation_mode": validation_mode,
             "validation_reason": validation_reason,
@@ -419,7 +514,6 @@ class ResultStore:
         shutil.copyfile(run_summary_csv_path, root_summary_csv_path)
         shutil.copyfile(run_summary_report_path, root_summary_report_path)
 
-        self._manifest["end_time"] = utc_now_iso8601()
         self._manifest["summary_files"] = {
             "run_summary_path": str(run_summary_path),
             "run_summary_csv_path": str(run_summary_csv_path),
@@ -428,7 +522,7 @@ class ResultStore:
             "root_summary_csv_path": str(root_summary_csv_path),
             "root_summary_report_path": str(root_summary_report_path),
         }
-        self._write_manifest()
+        self.finalize()
 
         return SummaryPaths(
             run_summary_path=run_summary_path,
@@ -455,6 +549,9 @@ class ResultStore:
                     "sequence_error_ratio",
                     "target_frame_count",
                     "target_frame_ratio",
+                    "planned_duration_s",
+                    "actual_capture_duration_s",
+                    "round_total_duration_s",
                     "validation_mode",
                     "validation_reason",
                     "recommended_for_runtime",
@@ -492,6 +589,9 @@ class ResultStore:
                         float(payload["sequence_error_ratio"][index]),
                         int(payload["target_frame_count"][index]),
                         float(payload["target_frame_ratio"][index]),
+                        float(payload["planned_duration_s"][index]),
+                        float(payload["actual_capture_duration_s"][index]),
+                        float(payload["round_total_duration_s"][index]),
                         str(payload["validation_mode"][index]),
                         str(payload["validation_reason"][index]),
                         bool(payload["recommended_for_runtime"][index]),
@@ -557,6 +657,9 @@ class ResultStore:
                     f"- recommended_for_runtime: `{'true' if bool(payload['recommended_for_runtime'][index]) else 'false'}`",
                     f"- conclusion_level: `{str(payload['conclusion_level'][index])}`",
                     f"- conclusion_text: `{str(payload['conclusion_text'][index])}`",
+                    f"- planned_duration_s: `{float(payload['planned_duration_s'][index]):.6f}`",
+                    f"- actual_capture_duration_s: `{float(payload['actual_capture_duration_s'][index]):.6f}`",
+                    f"- round_total_duration_s: `{float(payload['round_total_duration_s'][index]):.6f}`",
                     (
                         f"- core_parameters: `coulomb={float(payload['coulomb'][index]):.6f}, "
                         f"viscous={float(payload['viscous'][index]):.6f}, "
@@ -582,6 +685,9 @@ class ResultStore:
                     f"- conclusion_level: `{str(payload['conclusion_level'][index])}`",
                     f"- sequence_error_count: `{int(payload['sequence_error_count'][index])}`",
                     f"- target_frame_count: `{int(payload['target_frame_count'][index])}`",
+                    f"- planned_duration_s: `{float(payload['planned_duration_s'][index]):.6f}`",
+                    f"- actual_capture_duration_s: `{float(payload['actual_capture_duration_s'][index]):.6f}`",
+                    f"- round_total_duration_s: `{float(payload['round_total_duration_s'][index]):.6f}`",
                     f"- saturation_ratio: `{float(payload['saturation_ratio'][index]):.4f}`",
                     f"- tracking_error_ratio: `{float(payload['tracking_error_ratio'][index]):.4f}`",
                     "",

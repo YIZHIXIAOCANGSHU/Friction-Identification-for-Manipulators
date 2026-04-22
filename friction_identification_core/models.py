@@ -64,6 +64,25 @@ class RoundCapture:
 
 
 @dataclass(frozen=True)
+class MotorCompensationParameters:
+    motor_id: int
+    motor_name: str
+    coulomb: float
+    viscous: float
+    offset: float
+    velocity_scale: float
+
+    def feedforward_torque(self, velocity_cmd: float) -> float:
+        scale = max(float(self.velocity_scale), 1.0e-6)
+        velocity_cmd = float(velocity_cmd)
+        return float(
+            float(self.coulomb) * np.tanh(velocity_cmd / scale)
+            + float(self.viscous) * velocity_cmd
+            + float(self.offset)
+        )
+
+
+@dataclass(frozen=True)
 class MotorIdentificationResult:
     motor_id: int
     motor_name: str

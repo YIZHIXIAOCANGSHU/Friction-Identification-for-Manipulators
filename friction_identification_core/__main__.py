@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 
 from friction_identification_core.config import DEFAULT_CONFIG_PATH, apply_overrides, load_config
-from friction_identification_core.pipeline import run_sequential_identification
+from friction_identification_core.pipeline import run_compensation_validation, run_sequential_identification
 from friction_identification_core.runtime import log_info
 
 
@@ -12,7 +12,7 @@ def _default_config_argument() -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Sequential single-motor friction identification CLI.")
+    parser = argparse.ArgumentParser(description="Single-motor runtime identify/compensate CLI.")
     parser.add_argument(
         "--config",
         default=_default_config_argument(),
@@ -20,9 +20,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("default", "sequential"),
-        default="sequential",
-        help="default is an alias of sequential.",
+        choices=("identify", "compensate", "default", "sequential"),
+        default="identify",
+        help="identify/compensate are the primary modes; default/sequential alias to identify.",
     )
     parser.add_argument(
         "--output",
@@ -43,13 +43,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _normalize_mode(mode: str) -> str:
+    if mode in ("default", "sequential"):
+        return "identify"
+    return str(mode)
+
+
 def main(argv: list[str] | None = None) -> None:
     try:
         parser = build_parser()
         args = parser.parse_args(argv)
         config = load_config(args.config)
         config = apply_overrides(config, output=args.output, motors=args.motors, groups=args.groups)
-        run_sequential_identification(config)
+        mode = _normalize_mode(str(args.mode))
+        if mode == "compensate":
+            run_compensation_validation(config, show_rerun_viewer=True)
+        else:
+            run_sequential_identification(config, show_rerun_viewer=True)
     except ValueError as exc:
         raise SystemExit(f"[ERROR] {exc}") from exc
     except KeyboardInterrupt:

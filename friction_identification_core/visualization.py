@@ -5,7 +5,7 @@ from typing import Mapping
 
 import numpy as np
 
-from friction_identification_core.models import MotorIdentificationResult, RoundCapture
+from friction_identification_core.models import MotorCompensationParameters, MotorIdentificationResult, RoundCapture
 
 try:
     import rerun as rr
@@ -14,8 +14,17 @@ except ImportError:  # pragma: no cover - optional at import time
 
 
 class RerunRecorder:
-    def __init__(self, recording_path: Path, *, motor_ids: tuple[int, ...], motor_names: Mapping[int, str]) -> None:
+    def __init__(
+        self,
+        recording_path: Path,
+        *,
+        motor_ids: tuple[int, ...],
+        motor_names: Mapping[int, str],
+        mode: str = "identify",
+        show_viewer: bool = False,
+    ) -> None:
         self.recording_path = Path(recording_path)
+        self._mode = str(mode)
         self._motor_ids = tuple(int(motor_id) for motor_id in motor_ids)
         self._motor_names = {int(motor_id): str(motor_names[motor_id]) for motor_id in self._motor_ids}
         self._motor_index = {motor_id: index for index, motor_id in enumerate(self._motor_ids)}
@@ -27,6 +36,7 @@ class RerunRecorder:
         motor_count = len(self._motor_ids)
         self._live_position = np.full(motor_count, np.nan, dtype=np.float64)
         self._live_velocity = np.full(motor_count, np.nan, dtype=np.float64)
+        self._live_expected_velocity = np.zeros(motor_count, dtype=np.float64)
         self._live_target_torque = np.zeros(motor_count, dtype=np.float64)
         self._live_feedback_torque = np.full(motor_count, np.nan, dtype=np.float64)
         self._live_state = ["-"] * motor_count
@@ -37,25 +47,34 @@ class RerunRecorder:
             "round_index": 0,
             "active_motor_id": 0,
         }
+        self._latest_timing = {
+            "planned_duration_s": np.nan,
+            "actual_capture_duration_s": np.nan,
+            "sync_wait_duration_s": np.nan,
+            "round_total_duration_s": np.nan,
+        }
         self._latest_identification: dict[int, dict[str, object]] = {}
         if self._recording is None:
             return
         self._recording.save(self.recording_path)
+        if show_viewer:
+            self._spawn_viewer()
         self._send_default_blueprint()
         self._recording.log(
             "run/overview",
             rr.TextDocument(
                 "\n".join(
                     [
-                        "# Sequential Friction Identification",
+                        f"# {'Identify' if self._mode == 'identify' else 'Compensate'} Runtime View",
                         "",
-                        "- `live/overview/current_state`: all motor live snapshot",
-                        "- `live/all/signals/*`: all motor position / velocity / target torque / actual torque",
-                        "- `live/motors/motor_xx/*`: single motor live curves and latest identification result",
-                        "- `rounds/*/signals/*`: target motor round detail, including velocity error and saturation",
-                        "- `rounds/*/identification/*`: torque fit, residual and sample masks",
-                        "- `rounds/*/quality/summary`: round quality summary",
-                        "- `summary/*`: final summary bar charts, conclusions and report",
+                        "- `live/motors/motor_xx/status`: current state for one motor",
+                        "- `live/motors/motor_xx/signals/position`: feedback position",
+                        "- `live/motors/motor_xx/signals/velocity`: actual vs expected velocity",
+                        "- `live/motors/motor_xx/signals/velocity_error`: actual minus expected velocity",
+                        "- `live/motors/motor_xx/signals/torque`: sent command and torque feedback",
+                        "- `live/motors/motor_xx/signals/torque_error`: sent minus feedback torque",
+                        "- `live/motors/motor_xx/identification/summary`: latest parameters or identification result",
+                        "- `rounds/*`: round-level detail is still recorded for later drill-down",
                     ]
                 ),
                 media_type="text/markdown",
@@ -74,6 +93,20 @@ class RerunRecorder:
                 f"{self._live_motor_root(motor_id)}/identification/summary",
                 rr.TextDocument(self._build_live_identification_markdown(motor_id), media_type="text/markdown"),
             )
+
+    def _spawn_viewer(self) -> None:
+        if self._recording is None:
+            return
+
+        spawn = getattr(self._recording, "spawn", None)
+        if not callable(spawn):
+            return
+
+        try:
+            # Viewer launch is best-effort so data capture still works in headless environments.
+            spawn(connect=True, detach_process=True)
+        except Exception:
+            return
 
     @property
     def enabled(self) -> bool:
@@ -101,63 +134,35 @@ class RerunRecorder:
                 rrb.TextDocumentView(origin=f"/{self._live_motor_root(motor_id)}/status", name="Current State"),
                 rrb.Horizontal(
                     rrb.TimeSeriesView(origin=f"/{self._live_motor_root(motor_id)}/signals/position", name="Position"),
-                    rrb.TimeSeriesView(origin=f"/{self._live_motor_root(motor_id)}/signals/velocity", name="Velocity"),
+                    rrb.TimeSeriesView(
+                        origin=f"/{self._live_motor_root(motor_id)}/signals/velocity",
+                        name="Expected vs Actual Velocity",
+                    ),
                 ),
                 rrb.Horizontal(
-                    rrb.TimeSeriesView(origin=f"/{self._live_motor_root(motor_id)}/signals/torque", name="Target vs Actual Torque"),
-                    rrb.TextDocumentView(
-                        origin=f"/{self._live_motor_root(motor_id)}/identification/summary",
-                        name="Identification",
+                    rrb.TimeSeriesView(
+                        origin=f"/{self._live_motor_root(motor_id)}/signals/velocity_error",
+                        name="Velocity Error",
                     ),
+                    rrb.TimeSeriesView(
+                        origin=f"/{self._live_motor_root(motor_id)}/signals/torque",
+                        name="Sent Command vs Feedback Torque",
+                    ),
+                    rrb.TimeSeriesView(
+                        origin=f"/{self._live_motor_root(motor_id)}/signals/torque_error",
+                        name="Torque Error",
+                    ),
+                ),
+                rrb.TextDocumentView(
+                    origin=f"/{self._live_motor_root(motor_id)}/identification/summary",
+                    name="Identification",
                 ),
                 name=self._motor_label(motor_id),
             )
             for motor_id in self._motor_ids
         ]
 
-        overview_tab = rrb.Vertical(
-            rrb.TextDocumentView(origin="/live/overview/current_state", name="Current State"),
-            rrb.Horizontal(
-                rrb.TimeSeriesView(origin="/live/all/signals/position", name="All Motor Position"),
-                rrb.TimeSeriesView(origin="/live/all/signals/velocity", name="All Motor Velocity"),
-            ),
-            rrb.Horizontal(
-                rrb.TimeSeriesView(origin="/live/all/signals/target_torque", name="Target Torque"),
-                rrb.TimeSeriesView(origin="/live/all/signals/feedback_torque", name="Actual Torque"),
-            ),
-            name="Overview",
-        )
-        identification_tab = rrb.Vertical(
-            rrb.Horizontal(
-                rrb.BarChartView(origin="/summary/coulomb", name="Coulomb"),
-                rrb.BarChartView(origin="/summary/viscous", name="Viscous"),
-                rrb.BarChartView(origin="/summary/offset", name="Offset"),
-            ),
-            rrb.Horizontal(
-                rrb.BarChartView(origin="/summary/velocity_scale", name="Velocity Scale"),
-                rrb.BarChartView(origin="/summary/validation_rmse", name="Validation RMSE"),
-                rrb.BarChartView(origin="/summary/validation_r2", name="Validation R2"),
-            ),
-            rrb.Horizontal(
-                rrb.BarChartView(origin="/summary/high_speed_valid_rmse", name="High-Speed Valid RMSE"),
-                rrb.BarChartView(origin="/summary/saturation_ratio", name="Saturation Ratio"),
-                rrb.BarChartView(origin="/summary/tracking_error_ratio", name="Tracking Error Ratio"),
-            ),
-            rrb.Horizontal(
-                rrb.BarChartView(origin="/summary/recommended_for_runtime", name="Recommended For Runtime"),
-                rrb.TextDocumentView(origin="/summary/conclusions", name="Conclusions"),
-            ),
-            rrb.TextDocumentView(origin="/summary/report", name="Summary Report"),
-            name="Identification",
-        )
-        blueprint = rrb.Blueprint(
-            rrb.Tabs(
-                overview_tab,
-                rrb.Tabs(*by_motor_tabs, name="By Motor"),
-                identification_tab,
-            ),
-            auto_views=False,
-        )
+        blueprint = rrb.Blueprint(rrb.Tabs(*by_motor_tabs), auto_views=False)
         self._recording.send_blueprint(blueprint, make_active=True, make_default=True)
 
     def _format_float(self, value: float, *, digits: int = 6) -> str:
@@ -165,6 +170,15 @@ class RerunRecorder:
         if not np.isfinite(value):
             return "-"
         return f"{value:.{digits}f}"
+
+    def _current_torque_error(self, index: int) -> float:
+        feedback = float(self._live_feedback_torque[index])
+        if not np.isfinite(feedback):
+            return np.nan
+        return float(self._live_target_torque[index]) - feedback
+
+    def _current_velocity_error(self, index: int) -> float:
+        return float(self._live_velocity[index]) - float(self._live_expected_velocity[index])
 
     def _build_current_state_markdown(self) -> str:
         context = self._latest_context
@@ -174,9 +188,13 @@ class RerunRecorder:
             f"- active_group: `{int(context['group_index'])}`",
             f"- active_round: `{int(context['round_index'])}`",
             f"- active_motor_id: `{int(context['active_motor_id'])}`",
+            f"- planned_duration_s: `{self._format_float(float(self._latest_timing['planned_duration_s']))}`",
+            f"- actual_capture_duration_s: `{self._format_float(float(self._latest_timing['actual_capture_duration_s']))}`",
+            f"- sync_wait_duration_s: `{self._format_float(float(self._latest_timing['sync_wait_duration_s']))}`",
+            f"- round_total_duration_s: `{self._format_float(float(self._latest_timing['round_total_duration_s']))}`",
             "",
-            "| motor | position | velocity | target_torque | actual_torque | state | temp_c | phase | identified | coulomb | viscous | offset | valid_rmse |",
-            "| --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | ---: | ---: | ---: |",
+            "| motor | position | actual_velocity | expected_velocity | velocity_error | sent_command | actual_torque | torque_error | state | temp_c | phase | identified | coulomb | viscous | offset | valid_rmse |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | ---: | ---: | ---: |",
         ]
         for motor_id in self._motor_ids:
             index = self._motor_index[motor_id]
@@ -186,8 +204,11 @@ class RerunRecorder:
                 f"{self._motor_label(motor_id)} | "
                 f"{self._format_float(self._live_position[index])} | "
                 f"{self._format_float(self._live_velocity[index])} | "
+                f"{self._format_float(self._live_expected_velocity[index])} | "
+                f"{self._format_float(self._current_velocity_error(index))} | "
                 f"{self._format_float(self._live_target_torque[index])} | "
                 f"{self._format_float(self._live_feedback_torque[index])} | "
+                f"{self._format_float(self._current_torque_error(index))} | "
                 f"{self._live_state[index]} | "
                 f"{self._format_float(self._live_temperature[index], digits=2)} | "
                 f"{self._live_phase[index]} | "
@@ -208,14 +229,21 @@ class RerunRecorder:
             "",
             f"- current_position: `{self._format_float(self._live_position[index])}`",
             f"- current_velocity: `{self._format_float(self._live_velocity[index])}`",
-            f"- target_torque: `{self._format_float(self._live_target_torque[index])}`",
+            f"- expected_velocity: `{self._format_float(self._live_expected_velocity[index])}`",
+            f"- velocity_error: `{self._format_float(self._current_velocity_error(index))}`",
+            f"- sent_command: `{self._format_float(self._live_target_torque[index])}`",
             f"- actual_torque: `{self._format_float(self._live_feedback_torque[index])}`",
+            f"- torque_error: `{self._format_float(self._current_torque_error(index))}`",
             f"- state: `{self._live_state[index]}`",
             f"- mos_temperature_c: `{self._format_float(self._live_temperature[index], digits=2)}`",
             f"- phase: `{self._live_phase[index]}`",
             f"- active_group: `{int(context['group_index'])}`",
             f"- active_round: `{int(context['round_index'])}`",
             f"- active_motor_id: `{int(context['active_motor_id'])}`",
+            f"- planned_duration_s: `{self._format_float(float(self._latest_timing['planned_duration_s']))}`",
+            f"- actual_capture_duration_s: `{self._format_float(float(self._latest_timing['actual_capture_duration_s']))}`",
+            f"- sync_wait_duration_s: `{self._format_float(float(self._latest_timing['sync_wait_duration_s']))}`",
+            f"- round_total_duration_s: `{self._format_float(float(self._latest_timing['round_total_duration_s']))}`",
             f"- identified: `{identification.get('identified', 'pending')}`",
         ]
         if identification:
@@ -266,7 +294,7 @@ class RerunRecorder:
             f"- high_speed_valid_rmse: `{self._format_float(float(result.metadata.get('high_speed_valid_rmse', np.nan)))}`",
         ]
 
-    def _build_quality_summary_lines(self, result: MotorIdentificationResult) -> list[str]:
+    def _build_quality_summary_lines(self, capture: RoundCapture, result: MotorIdentificationResult) -> list[str]:
         return [
             "# Round Quality Summary",
             "",
@@ -282,6 +310,10 @@ class RerunRecorder:
             f"- high_speed_valid_rmse: `{self._format_float(float(result.metadata.get('high_speed_valid_rmse', np.nan)))}`",
             f"- saturation_ratio: `{self._format_float(float(result.metadata.get('saturation_ratio', np.nan)), digits=4)}`",
             f"- tracking_error_ratio: `{self._format_float(float(result.metadata.get('tracking_error_ratio', np.nan)), digits=4)}`",
+            f"- planned_duration_s: `{self._format_float(float(capture.metadata.get('planned_duration_s', np.nan)))}`",
+            f"- actual_capture_duration_s: `{self._format_float(float(capture.metadata.get('actual_capture_duration_s', np.nan)))}`",
+            f"- sync_wait_duration_s: `{self._format_float(float(capture.metadata.get('sync_wait_duration_s', np.nan)))}`",
+            f"- round_total_duration_s: `{self._format_float(float(capture.metadata.get('round_total_duration_s', np.nan)))}`",
         ]
 
     def _build_summary_conclusions_markdown(self, summary: Mapping[str, np.ndarray]) -> str:
@@ -319,12 +351,32 @@ class RerunRecorder:
         if identification is None:
             return "\n".join(
                 [
-                    f"# Motor {int(motor_id):02d} Identification",
+                    f"# Motor {int(motor_id):02d} {'Identification' if self._mode == 'identify' else 'Compensation'}",
                     "",
                     "- status: `pending`",
                 ]
             )
         return "\n".join(identification["summary_lines"])
+
+    def _build_compensation_summary_lines(
+        self,
+        *,
+        motor_id: int,
+        parameters: MotorCompensationParameters,
+        parameters_path: Path,
+    ) -> list[str]:
+        return [
+            f"# Motor {int(motor_id):02d} Compensation",
+            "",
+            f"- status: `loaded`",
+            f"- parameters_path: `{parameters_path}`",
+            f"- motor_name: `{parameters.motor_name}`",
+            f"- identified: `true`",
+            f"- coulomb: `{float(parameters.coulomb):.6f}`",
+            f"- viscous: `{float(parameters.viscous):.6f}`",
+            f"- offset: `{float(parameters.offset):.6f}`",
+            f"- velocity_scale: `{float(parameters.velocity_scale):.6f}`",
+        ]
 
     def _ensure_live_series(self) -> None:
         if self._recording is None:
@@ -333,6 +385,7 @@ class RerunRecorder:
         global_series = {
             "live/all/signals/position": [self._motor_label(motor_id) for motor_id in self._motor_ids],
             "live/all/signals/velocity": [self._motor_label(motor_id) for motor_id in self._motor_ids],
+            "live/all/signals/expected_velocity": [self._motor_label(motor_id) for motor_id in self._motor_ids],
             "live/all/signals/target_torque": [self._motor_label(motor_id) for motor_id in self._motor_ids],
             "live/all/signals/feedback_torque": [self._motor_label(motor_id) for motor_id in self._motor_ids],
         }
@@ -349,14 +402,29 @@ class RerunRecorder:
         motor_root = self._live_motor_root(motor_id)
         series = {
             f"{motor_root}/signals/position": ["position"],
-            f"{motor_root}/signals/velocity": ["velocity"],
-            f"{motor_root}/signals/torque": ["target", "feedback"],
+            f"{motor_root}/signals/velocity": ["actual", "expected"],
+            f"{motor_root}/signals/velocity_error": ["actual_minus_expected"],
+            f"{motor_root}/signals/torque": ["sent_command", "feedback_torque"],
+            f"{motor_root}/signals/torque_error": ["sent_minus_feedback"],
         }
         for path, names in series.items():
             if path in self._initialized_paths:
                 continue
             self._recording.log(path, rr.SeriesLines(names=names), static=True)
             self._initialized_paths.add(path)
+
+    def _log_live_motor_documents(self, motor_id: int) -> None:
+        if self._recording is None:
+            return
+
+        self._recording.log(
+            f"{self._live_motor_root(motor_id)}/status",
+            rr.TextDocument(self._build_motor_status_markdown(motor_id), media_type="text/markdown"),
+        )
+        self._recording.log(
+            f"{self._live_motor_root(motor_id)}/identification/summary",
+            rr.TextDocument(self._build_live_identification_markdown(motor_id), media_type="text/markdown"),
+        )
 
     def _ensure_identification_history_series(self, motor_id: int) -> None:
         if self._recording is None:
@@ -377,13 +445,89 @@ class RerunRecorder:
             "live/overview/current_state",
             rr.TextDocument(self._build_current_state_markdown(), media_type="text/markdown"),
         )
+        self._log_live_motor_documents(motor_id)
+
+    def log_round_timing(
+        self,
+        *,
+        group_index: int,
+        round_index: int,
+        active_motor_id: int,
+        planned_duration_s: float,
+        actual_capture_duration_s: float,
+        sync_wait_duration_s: float,
+        round_total_duration_s: float,
+    ) -> None:
+        self._latest_context = {
+            "group_index": int(group_index),
+            "round_index": int(round_index),
+            "active_motor_id": int(active_motor_id),
+        }
+        self._latest_timing = {
+            "planned_duration_s": float(planned_duration_s),
+            "actual_capture_duration_s": float(actual_capture_duration_s),
+            "sync_wait_duration_s": float(sync_wait_duration_s),
+            "round_total_duration_s": float(round_total_duration_s),
+        }
+        if self._recording is None:
+            return
         self._recording.log(
-            f"{self._live_motor_root(motor_id)}/status",
-            rr.TextDocument(self._build_motor_status_markdown(motor_id), media_type="text/markdown"),
+            "live/overview/current_state",
+            rr.TextDocument(self._build_current_state_markdown(), media_type="text/markdown"),
         )
+        for motor_id in self._motor_ids:
+            self._log_live_motor_documents(int(motor_id))
+
+    def log_live_command_packet(
+        self,
+        *,
+        group_index: int,
+        round_index: int,
+        active_motor_id: int,
+        sent_commands: np.ndarray,
+        expected_velocities: np.ndarray,
+    ) -> None:
+        if self._recording is None:
+            return
+
+        sent_commands_array = np.asarray(sent_commands, dtype=np.float64).reshape(-1)
+        expected_velocity_array = np.asarray(expected_velocities, dtype=np.float64).reshape(-1)
+        self._latest_context = {
+            "group_index": int(group_index),
+            "round_index": int(round_index),
+            "active_motor_id": int(active_motor_id),
+        }
+        self._live_target_torque[:] = sent_commands_array
+        self._live_expected_velocity[:] = expected_velocity_array
+        self._ensure_live_series()
+        for motor_id in self._motor_ids:
+            self._ensure_live_motor_series(int(motor_id))
+        self._recording.set_time("live_sample", sequence=int(self._live_sample_index))
+        self._live_sample_index += 1
+        for index, motor_id in enumerate(self._motor_ids):
+            self._recording.log(
+                f"{self._live_motor_root(int(motor_id))}/signals/torque",
+                rr.Scalars([float(self._live_target_torque[index]), float(self._live_feedback_torque[index])]),
+            )
+            self._recording.log(
+                f"{self._live_motor_root(int(motor_id))}/signals/torque_error",
+                rr.Scalars([float(self._current_torque_error(index))]),
+            )
+            self._recording.log(
+                f"{self._live_motor_root(int(motor_id))}/signals/velocity",
+                rr.Scalars([float(self._live_velocity[index]), float(self._live_expected_velocity[index])]),
+            )
+            self._recording.log(
+                f"{self._live_motor_root(int(motor_id))}/signals/velocity_error",
+                rr.Scalars([float(self._current_velocity_error(index))]),
+            )
+            self._log_live_motor_documents(int(motor_id))
+        self._recording.log("live/all/signals/target_torque", rr.Scalars(self._live_target_torque.copy()))
+        self._recording.log("live/all/signals/feedback_torque", rr.Scalars(self._live_feedback_torque.copy()))
+        self._recording.log("live/all/signals/expected_velocity", rr.Scalars(self._live_expected_velocity.copy()))
         self._recording.log(
-            f"{self._live_motor_root(motor_id)}/identification/summary",
-            rr.TextDocument(self._build_live_identification_markdown(motor_id), media_type="text/markdown"),
+            "live/overview/current_state",
+            rr.TextDocument(self._build_current_state_markdown(), media_type="text/markdown"),
         )
 
     def _ensure_round_series(self, round_root: str) -> None:
@@ -403,7 +547,7 @@ class RerunRecorder:
         if velocity_path not in self._initialized_paths:
             self._recording.log(
                 velocity_path,
-                rr.SeriesLines(names=["feedback", "reference"]),
+                rr.SeriesLines(names=["actual", "expected"]),
                 static=True,
             )
             self._initialized_paths.add(velocity_path)
@@ -471,6 +615,7 @@ class RerunRecorder:
         motor_id: int,
         position: float,
         velocity: float,
+        expected_velocity: float,
         target_torque: float,
         feedback_torque: float,
         state: int,
@@ -489,6 +634,7 @@ class RerunRecorder:
         }
         self._live_position[index] = float(position)
         self._live_velocity[index] = float(velocity)
+        self._live_expected_velocity[index] = float(expected_velocity)
         self._live_target_torque[index] = float(target_torque)
         self._live_feedback_torque[index] = float(feedback_torque)
         self._live_state[index] = str(int(state))
@@ -501,10 +647,22 @@ class RerunRecorder:
         self._live_sample_index += 1
         motor_root = self._live_motor_root(motor_id)
         self._recording.log(f"{motor_root}/signals/position", rr.Scalars([float(position)]))
-        self._recording.log(f"{motor_root}/signals/velocity", rr.Scalars([float(velocity)]))
+        self._recording.log(
+            f"{motor_root}/signals/velocity",
+            rr.Scalars([float(velocity), float(expected_velocity)]),
+        )
+        self._recording.log(
+            f"{motor_root}/signals/velocity_error",
+            rr.Scalars([float(self._current_velocity_error(index))]),
+        )
         self._recording.log(f"{motor_root}/signals/torque", rr.Scalars([float(target_torque), float(feedback_torque)]))
+        self._recording.log(
+            f"{motor_root}/signals/torque_error",
+            rr.Scalars([float(self._current_torque_error(index))]),
+        )
         self._recording.log("live/all/signals/position", rr.Scalars(self._live_position.copy()))
         self._recording.log("live/all/signals/velocity", rr.Scalars(self._live_velocity.copy()))
+        self._recording.log("live/all/signals/expected_velocity", rr.Scalars(self._live_expected_velocity.copy()))
         self._recording.log("live/all/signals/target_torque", rr.Scalars(self._live_target_torque.copy()))
         self._recording.log("live/all/signals/feedback_torque", rr.Scalars(self._live_feedback_torque.copy()))
         self._log_live_overview_documents(motor_id)
@@ -528,15 +686,29 @@ class RerunRecorder:
             "active_motor_id": int(motor_id),
         }
         self._live_target_torque[index] = 0.0
+        self._live_expected_velocity[index] = 0.0
         self._live_phase[index] = str(phase_name)
         self._ensure_live_series()
         self._ensure_live_motor_series(motor_id)
         self._recording.set_time("live_sample", sequence=int(self._live_sample_index))
         self._live_sample_index += 1
         self._recording.log(
+            f"{self._live_motor_root(motor_id)}/signals/velocity",
+            rr.Scalars([float(self._live_velocity[index]), 0.0]),
+        )
+        self._recording.log(
+            f"{self._live_motor_root(motor_id)}/signals/velocity_error",
+            rr.Scalars([float(self._current_velocity_error(index))]),
+        )
+        self._recording.log(
             f"{self._live_motor_root(motor_id)}/signals/torque",
             rr.Scalars([0.0, float(self._live_feedback_torque[index])]),
         )
+        self._recording.log(
+            f"{self._live_motor_root(motor_id)}/signals/torque_error",
+            rr.Scalars([float(self._current_torque_error(index))]),
+        )
+        self._recording.log("live/all/signals/expected_velocity", rr.Scalars(self._live_expected_velocity.copy()))
         self._recording.log("live/all/signals/target_torque", rr.Scalars(self._live_target_torque.copy()))
         self._recording.log("live/all/signals/feedback_torque", rr.Scalars(self._live_feedback_torque.copy()))
         self._log_live_overview_documents(motor_id)
@@ -618,7 +790,7 @@ class RerunRecorder:
             f"{round_root}/identification/summary",
             rr.TextDocument("\n".join(summary_lines), media_type="text/markdown"),
         )
-        quality_summary_lines = self._build_quality_summary_lines(result)
+        quality_summary_lines = self._build_quality_summary_lines(capture, result)
         self._recording.log(
             f"{round_root}/quality/summary",
             rr.TextDocument("\n".join(quality_summary_lines), media_type="text/markdown"),
@@ -684,6 +856,35 @@ class RerunRecorder:
                 rr.Scalars([value]),
             )
         self._log_live_overview_documents(int(capture.target_motor_id))
+
+    def log_compensation_reference(
+        self,
+        *,
+        motor_id: int,
+        parameters: MotorCompensationParameters,
+        parameters_path: Path,
+    ) -> None:
+        summary_lines = self._build_compensation_summary_lines(
+            motor_id=int(motor_id),
+            parameters=parameters,
+            parameters_path=parameters_path,
+        )
+        self._latest_identification[int(motor_id)] = {
+            "identified": True,
+            "status": "loaded",
+            "coulomb": float(parameters.coulomb),
+            "viscous": float(parameters.viscous),
+            "offset": float(parameters.offset),
+            "velocity_scale": float(parameters.velocity_scale),
+            "valid_rmse": float("nan"),
+            "valid_r2": float("nan"),
+            "conclusion_level": "compensate",
+            "recommended_for_runtime": True,
+            "summary_lines": summary_lines,
+        }
+        if self._recording is None:
+            return
+        self._log_live_overview_documents(int(motor_id))
 
     def log_summary(self, *, summary_path: Path, report_path: Path) -> None:
         if self._recording is None:

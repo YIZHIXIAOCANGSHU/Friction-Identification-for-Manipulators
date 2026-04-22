@@ -31,7 +31,7 @@ serial:
   flush_input_before_round: true
   # 开始正式采集前，等待同步成功的最长时间，单位秒。
   sync_timeout: 2.0
-  # 需要连续观察到的同步周期数；实际所需帧数约为 `启用电机数 * 该值`。
+  # 进入正式采集前，目标电机至少需要命中这么多次合法反馈帧。
   sync_cycles_required: 3
 
 # 激励轨迹配置。
@@ -46,28 +46,40 @@ excitation:
   hold_end: 1.0
   # 正反向平台之间，以及反向结束回零时使用的统一过渡时间，单位秒。
   transition_duration: 0.35
-  # 显式定义每个速度平台。`speed_ratio` 会在运行时换算成 `speed_ratio * max_velocity`。
+  # 显式定义每个速度平台，按列表顺序依次执行。
+  # 每个平台都会经历“加速进入该档位 -> 等待瞬态衰减 -> 稳态采样”三个阶段，
+  # 然后在 `transition_duration` 内回到零速或切到下一段反向轨迹。
+  # `speed_ratio` 会在运行时换算成 `speed_ratio * max_velocity`，因此这里填的是相对比例而不是绝对速度。
+  # 一般来说，低速档更有助于观察库仑摩擦和死区，高速档更有助于分离黏性摩擦项。
   platforms:
+    # 第 1 档：低速试探段，优先覆盖起步附近的摩擦特性。
     - speed_ratio: 0.12
-      settle_duration: 0.30
-      steady_duration: 0.90
+      # 到达目标速度后先留一小段稳定时间，避开加减速瞬态。
+      settle_duration: 1.00
+      # 真正用于稳态统计与参数拟合的数据窗口长度。
+      steady_duration: 2.50
+    # 第 2 档：低中速段，在保证稳定性的同时增加速度覆盖范围。
     - speed_ratio: 0.28
-      settle_duration: 0.35
-      steady_duration: 1.00
+      settle_duration: 1.50
+      steady_duration: 3.00
+    # 第 3 档：中速段，通常是兼顾信噪比和时长的主力平台。
     - speed_ratio: 0.50
-      settle_duration: 0.45
-      steady_duration: 1.20
+      settle_duration: 2.00
+      steady_duration: 3.50
+    # 第 4 档：中高速段，帮助区分速度相关项并观察更明显的黏性趋势。
     - speed_ratio: 0.72
-      settle_duration: 0.60
-      steady_duration: 1.40
+      settle_duration: 3.00
+      steady_duration: 4.50
+    # 第 5 档：接近上限的高速段，用于补足高速度区间信息。
+    # 由于速度更高、系统瞬态更明显，通常需要更长的稳定和采样时间。
     - speed_ratio: 0.90
-      settle_duration: 0.80
-      steady_duration: 1.70
+      settle_duration: 5.00
+      steady_duration: 5.00
 
 # 控制器限幅。
 control:
   # 速度误差映射到扭矩命令时的归一化上限；标量会广播到所有电机。
-  max_velocity: 0.5
+  max_velocity: 5.0
   # 每个电机的扭矩限幅；列表长度需与电机数量一致。
   max_torque: [40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0]
 
@@ -95,6 +107,7 @@ identification:
   # 目标电机有效帧占整轮采样的最低比例，低于此值会判定采样不足。
   min_target_frame_ratio: 0.7
   # 允许的最大序列错误比例，过高会直接放弃该轮数据。
+  # 兼容保留字段：当前版本不再依赖总线顺序做同步或判废。
   max_sequence_error_ratio: 0.2
   # 预留给验证抽样策略的步长参数；当前版本已解析，但未进入主流程。
   validation_stride: 5

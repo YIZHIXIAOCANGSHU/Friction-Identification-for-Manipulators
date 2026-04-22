@@ -1,0 +1,25 @@
+{
+  "run_label": "20260422_111422_identify",
+  "mode": "identify",
+  "start_time": "2026-04-22T03:14:22+00:00",
+  "end_time": null,
+  "group_count": 1,
+  "motor_order": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "capture_files": [
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_111422_identify/group_01/motor_01/capture.npz"
+  ],
+  "identification_files": [
+    "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_111422_identify/group_01/motor_01/identification.npz"
+  ],
+  "summary_files": {},
+  "rerun_recording_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260422_111422_identify/identify.rrd",
+  "config_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/friction_identification_core/default.yaml"
+}

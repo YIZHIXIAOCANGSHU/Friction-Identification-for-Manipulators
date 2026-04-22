@@ -1,8 +1,0 @@
-motor_id,motor_name,identified,coulomb,viscous,offset,velocity_scale,validation_rmse,validation_r2,sample_count,valid_sample_ratio,coulomb_std,viscous_std,offset_std,round_count
-1,motor_01,False,nan,nan,nan,nan,nan,nan,29,1.0,nan,nan,nan,1
-2,motor_02,False,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0
-3,motor_03,False,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0
-4,motor_04,False,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0
-5,motor_05,False,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0
-6,motor_06,False,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0
-7,motor_07,False,nan,nan,nan,nan,nan,nan,0,nan,nan,nan,nan,0

@@ -43,7 +43,10 @@ class SerialFrameParser:
         if chunk:
             self._buffer.extend(chunk)
 
-    def _is_valid_candidate(self, parsed: tuple[object, ...], *, has_following_frame: bool) -> bool:
+    def reset(self) -> None:
+        self._buffer.clear()
+
+    def _is_valid_candidate(self, parsed: tuple[object, ...]) -> bool:
         if int(parsed[0]) != RECV_FRAME_HEAD:
             return False
         motor_id = int(parsed[1])
@@ -51,8 +54,6 @@ class SerialFrameParser:
             return False
         values = np.asarray(parsed[3:], dtype=np.float32)
         if not np.all(np.isfinite(values)):
-            return False
-        if has_following_frame and self._buffer[RECV_FRAME_SIZE] != RECV_FRAME_HEAD:
             return False
         return True
 
@@ -75,10 +76,7 @@ class SerialFrameParser:
             except struct.error:
                 return None
 
-            if not self._is_valid_candidate(
-                parsed,
-                has_following_frame=len(self._buffer) >= (RECV_FRAME_SIZE * 2),
-            ):
+            if not self._is_valid_candidate(parsed):
                 del self._buffer[0]
                 continue
 

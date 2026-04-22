@@ -6,7 +6,8 @@
 
 - 一次只对一个电机做激励、采集和辨识
 - 多个电机按配置顺序串行执行
-- `default` 和 `sequential` 是同一条主流程
+- CLI 主模式是 `identify` 和 `compensate`
+- `default` 和 `sequential` 仅作为 `identify` 的兼容别名
 - `./run.sh` 是人工使用的交互式数字向导
 - `python3 -m friction_identification_core ...` 是脚本化 / 自动化入口
 - 轨迹使用 `hold_start -> 正向平台 -> transition_mid_zero -> 反向平台 -> transition_end_zero -> hold_end`
@@ -18,8 +19,8 @@
 
 以当前代码为准，真实边界如下：
 
-- CLI 入口只有 `default` 和 `sequential`
-- `default` 只是 `sequential` 的别名
+- CLI 主模式是 `identify` 和 `compensate`
+- `default` 和 `sequential` 都会映射到 `identify`
 - 主入口是 `friction_identification_core/__main__.py`
 - 主流程编排在 `friction_identification_core/pipeline.py`
 - 激励轨迹在 `friction_identification_core/trajectory.py`
@@ -33,7 +34,7 @@
 下面这些内容曾经出现在旧 README 或历史认知里，但已经不是当前真实行为：
 
 - 旧说法：存在 `collect / compensate / compare`
-  当前真实代码：CLI 只支持 `default / sequential`
+  当前真实代码：CLI 主模式是 `identify / compensate`
 - 旧说法：7 轴并行采集、并行辨识
   当前真实代码：一次只激励一个目标电机，其余电机只作为串口序列上下文
 - 旧说法：整段复合轨迹直接拟合
@@ -49,7 +50,8 @@
 
 1. 打开串口并清空输入缓存
 2. 等待通信同步
-   - 连续收到足够数量、顺序正确的合法帧后，才允许进入正式采集
+   - 目标电机命中足够数量的合法反馈帧后，就允许进入正式采集
+   - 不再依赖总线帧顺序，单帧只校验帧头、长度、`motor_id` 范围和数值有限性
    - 同步前不会开始 round 的正式计时，也不会把样本写入 capture
 3. 对目标电机发送单电机恒速平台激励
 4. 只记录正式采集窗口内的目标电机样本
@@ -57,6 +59,7 @@
    - `synced_before_capture`
    - `sequence_error_count / sequence_error_ratio`
    - `target_frame_count / target_frame_ratio`
+   - `planned_duration_s / actual_capture_duration_s / round_total_duration_s`
 6. 再做 steady-state 样本筛选
 7. 用最简单可落地的静态摩擦模型拟合
    - `torque = coulomb * tanh(v / scale) + viscous * v + offset`
@@ -91,19 +94,28 @@ excitation:
   hold_start: 1.0
   hold_end: 1.0
   transition_duration: 0.35
+  # 每个平台按顺序执行；速度会在正向和反向各走一遍。
+  # speed_ratio 是相对比例，实际目标速度 = speed_ratio * max_velocity。
   platforms:
+    # 低速段：更容易看到起步附近的库仑摩擦特性。
     - speed_ratio: 0.12
+      # 到达目标速度后先等待瞬态衰减。
       settle_duration: 0.30
+      # 真正用于稳态辨识的数据采样窗口。
       steady_duration: 0.90
+    # 低中速段：补充更宽一点的速度覆盖。
     - speed_ratio: 0.28
       settle_duration: 0.35
       steady_duration: 1.00
+    # 中速段：通常是时长和信噪比较均衡的一档。
     - speed_ratio: 0.50
       settle_duration: 0.45
       steady_duration: 1.20
+    # 中高速段：帮助区分更明显的速度相关摩擦项。
     - speed_ratio: 0.72
       settle_duration: 0.60
       steady_duration: 1.40
+    # 高速段：补足高速度区间信息，通常需要更长稳定时间。
     - speed_ratio: 0.90
       settle_duration: 0.80
       steady_duration: 1.70
@@ -111,8 +123,8 @@ excitation:
 
 - `speed` 是绝对速度值
 - `speed_ratio` 会在运行时换算成 `speed_ratio * max_velocity`
-- `settle_duration` 用于进入该平台前的过渡段
-- `steady_duration` 是真正进入辨识的稳态采样窗口
+- `settle_duration` 是达到目标速度后的等待时间，用来避开瞬态，不直接参与稳态拟合
+- `steady_duration` 是稳态采样窗口长度，这一段数据会更直接影响辨识结果
 - 反向阶段不会单独配置，运行时会按同一组平台自动镜像
 - 平台速度如果超过 `0.90 * max_velocity` 会直接报错，不会静默裁剪
 
@@ -132,6 +144,43 @@ excitation:
 - 少于 4 档时会退化为 `train_only`
 - 最终结论会直接给出 `recommended / caution / reject`
 - 只有 `recommended_for_runtime = true` 的结果才建议进入后续补偿参数库
+- `max_sequence_error_ratio` 和顺序字段仍保留在配置与结果里，但现在只是兼容字段，不再阻塞采集或判废
+
+## 补偿语义
+
+`compensate` 模式会复用当前顺序和激励轨迹，但不会再做辨识。它会：
+
+- 默认读取 `results/hardware_identification_summary.npz`
+- 只接受 `recommended_for_runtime = true` 且参数有限的目标电机
+- 对当前目标电机使用
+  - `速度误差反馈`
+  - `+ 基于 reference.velocity_cmd 的摩擦前馈`
+- 记录速度跟踪结果，重点看 `expected velocity / actual velocity / velocity_error`
+
+补偿模式不会覆盖根目录的辨识 summary，也不会写 `identification.npz`。
+
+## 执行时间为什么会和预期不一样
+
+当前默认配置下，单个电机一轮 `planned_duration_s` 大约是 `64.7s`，不是旧文档里那组更短平台参数对应的 `20.1s`。原因很直接：
+
+- `hold_start = 1.0s`
+- 正向 5 档平台总和 = `26.5s`
+- `transition_mid_zero = 0.35s`
+- 反向 5 档平台总和 = `26.5s`
+- `transition_end_zero = 0.35s`
+- `hold_end = 1.0s`
+
+也就是说，理论轨迹时长本身就是：
+
+`1.0 + 26.5 + 0.35 + 26.5 + 0.35 + 1.0 = 64.7s`
+
+实际运行时长还会再叠加：
+
+- `sync_wait_duration_s`
+- 存盘和离线辨识开销
+- 墙钟时间驱动采集带来的轻微偏差
+
+当前停止条件是“墙钟采集时长达到规划时长”，不是“严格采满 `sample_rate * duration` 个目标帧”。所以样本数和总执行时间都不应该按理想采样周期去硬推。
 
 ## 运行方式
 
@@ -144,34 +193,41 @@ excitation:
 底层 CLI：
 
 ```bash
-python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode sequential
+python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode identify
+python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode compensate
 python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode default
-python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode sequential --motors 1,3,5
-python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode sequential --groups 2
-python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode sequential --output results/debug
+python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode identify --motors 1,3,5
+python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode identify --groups 2
+python3 -m friction_identification_core --config friction_identification_core/default.yaml --mode identify --output results/debug
 ```
 
 说明：
 
 - `./run.sh` 现在始终先进入交互式数字菜单
 - `./run.sh help` / `./run.sh -h` / `./run.sh --help` 仍然保留
-- `./run.sh sequential --motors 1,3,5` 这类旧式非交互调用不再支持
-- 菜单里仍然显示 `default` 和 `sequential`，CLI 里也仍然保留这两个 mode
-- 它们仍然走同一条主流程，`default` 只是 `sequential` 的别名
+- `./run.sh identify --motors 1,3,5` 这类旧式非交互调用不再支持
+- 菜单里显示的是 `identify` 和 `compensate`
+- CLI 里仍然保留 `default / sequential`，但它们只会映射到 `identify`
 
 ## 输出物
 
-每次运行会在 `results/runs/<timestamp>_sequential/` 下归档，并同步写一份最新 summary 到 `results/`。
+每次运行会在 `results/runs/<timestamp>_<mode>/` 下归档。
+
+- `identify` 会同步写一份最新 summary 到 `results/`
+- `compensate` 只写本次运行目录，不会覆盖根目录辨识 summary
 
 核心产物：
 
 - `group_XX/motor_XX/capture.npz`
+- `run_manifest.json`
+- `<mode>.rrd`
+
+仅 `identify` 额外产出：
+
 - `group_XX/motor_XX/identification.npz`
 - `summary/hardware_identification_summary.npz`
 - `summary/hardware_identification_summary.csv`
 - `summary/hardware_identification_report.md`
-- `run_manifest.json`
-- `sequential_identification.rrd`
 
 当前最关键的结果字段包括：
 
@@ -180,6 +236,9 @@ python3 -m friction_identification_core --config friction_identification_core/de
   - `sequence_error_ratio`
   - `target_frame_count`
   - `target_frame_ratio`
+  - `planned_duration_s`
+  - `actual_capture_duration_s`
+  - `round_total_duration_s`
   - `synced_before_capture`
   - `saturation_ratio`
   - `tracking_error_ratio`

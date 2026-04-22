@@ -62,15 +62,9 @@ class RunShInteractionTests(unittest.TestCase):
         completed = self._run_script(
             input_text="\n".join(
                 [
-                    "2",
                     "1",
                     "2",
                     "1,3,5",
-                    "2",
-                    "2",
-                    "2",
-                    "results/debug",
-                    "1",
                     "",
                 ]
             ),
@@ -84,58 +78,67 @@ class RunShInteractionTests(unittest.TestCase):
                 "-m",
                 "friction_identification_core",
                 "--mode",
-                "sequential",
+                "identify",
                 "--config",
                 "friction_identification_core/default.yaml",
                 "--motors",
                 "1,3,5",
-                "--groups",
-                "2",
                 "--output",
-                "results/debug",
+                "results",
             ],
         )
         self.assertIn("--mode", completed.stdout)
         self.assertIn("--motors", completed.stdout)
-        self.assertIn("--groups", completed.stdout)
         self.assertIn("--output", completed.stdout)
 
+    def test_compensate_menu_builds_expected_command(self) -> None:
+        completed = self._run_script(
+            input_text="\n".join(
+                [
+                    "2",
+                    "1",
+                    "",
+                ]
+            ),
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertEqual(
+            self._fake_python_args(completed),
+            [
+                "-m",
+                "friction_identification_core",
+                "--mode",
+                "compensate",
+                "--config",
+                "friction_identification_core/default.yaml",
+                "--motors",
+                "all",
+                "--output",
+                "results",
+            ],
+        )
+
     def test_invalid_inputs_retry_until_valid(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            custom_config = Path(tmpdir) / "custom.yaml"
-            custom_config.write_text("excitation:\n  sample_rate: 200.0\n", encoding="utf-8")
-            completed = self._run_script(
-                input_text="\n".join(
-                    [
-                        "",
-                        "9",
-                        "1",
-                        "3",
-                        "2",
-                        "missing.yaml",
-                        str(custom_config),
-                        "9",
-                        "2",
-                        "1, x",
-                        "all",
-                        "9",
-                        "2",
-                        "0",
-                        "2",
-                        "1",
-                        "9",
-                        "1",
-                        "1",
-                        "",
-                    ]
-                ),
-            )
+        completed = self._run_script(
+            input_text="\n".join(
+                [
+                    "",
+                    "9",
+                    "1",
+                    "9",
+                    "2",
+                    "1, x",
+                    "all",
+                    "",
+                ]
+            ),
+        )
 
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         self.assertIn("输入无效", completed.stdout)
-        self.assertIn("配置文件不存在", completed.stdout)
         self.assertIn("--config", completed.stdout)
-        self.assertIn(str(custom_config), completed.stdout)
+        self.assertIn("friction_identification_core/default.yaml", completed.stdout)
         self.assertIn("--motors", completed.stdout)
         self.assertEqual(
             self._fake_python_args(completed),
@@ -143,13 +146,11 @@ class RunShInteractionTests(unittest.TestCase):
                 "-m",
                 "friction_identification_core",
                 "--mode",
-                "default",
+                "identify",
                 "--config",
-                str(custom_config),
+                "friction_identification_core/default.yaml",
                 "--motors",
                 "all",
-                "--groups",
-                "2",
                 "--output",
                 "results",
             ],

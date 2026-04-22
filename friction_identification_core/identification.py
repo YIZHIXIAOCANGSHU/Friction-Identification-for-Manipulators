@@ -249,8 +249,6 @@ def _capture_quality_metadata(config: IdentificationConfig, capture: RoundCaptur
     }
     if not synced_before_capture:
         return "sync_not_acquired", metadata
-    if sequence_error_ratio > float(config.max_sequence_error_ratio):
-        return "excessive_sequence_errors", metadata
     if target_frame_ratio < float(config.min_target_frame_ratio):
         return "insufficient_target_frames", metadata
     return None, metadata
