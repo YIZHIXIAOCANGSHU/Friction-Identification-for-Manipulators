@@ -1,0 +1,8 @@
+motor_id,motor_name,status,identified,validation_mode,validation_reason,train_cycles,valid_cycles,fc,fs,vs,sigma0,sigma1,sigma2,offset,validation_rmse,validation_r2,static_validation_rmse,sample_count,valid_sample_ratio,round_count
+1,motor_01,static_identification_unavailable,False,train_only,static_identification_unavailable,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,0,0.0,1
+2,motor_02,,False,,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,0,nan,0
+3,motor_03,,False,,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,0,nan,0
+4,motor_04,,False,,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,0,nan,0
+5,motor_05,,False,,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,0,nan,0
+6,motor_06,,False,,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,0,nan,0
+7,motor_07,,False,,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,0,nan,0

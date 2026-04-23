@@ -1,0 +1,31 @@
+{
+  "run_label": "20260423_093920_identify",
+  "mode": "identify",
+  "start_time": "2026-04-23T01:39:20+00:00",
+  "end_time": "2026-04-23T01:39:28+00:00",
+  "group_count": 1,
+  "motor_order": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "capture_files": [],
+  "identification_files": [],
+  "dynamic_identification_files": [],
+  "summary_files": {},
+  "rerun_recording_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260423_093920_identify/identify.rrd",
+  "config_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/friction_identification_core/default.yaml",
+  "abort_event": {
+    "reason": "zeroing_timeout",
+    "stage": "zeroing",
+    "motor_id": 1,
+    "group_index": 0,
+    "round_index": 0,
+    "phase_name": "zeroing",
+    "detail": "elapsed=8.014, raw_position=-0.484172, raw_velocity=-0.010990, filtered_position=-0.484172, filtered_velocity=-0.010990, success_count=0/8"
+  }
+}

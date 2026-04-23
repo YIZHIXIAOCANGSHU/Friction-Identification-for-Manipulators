@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--motors",
         default=None,
-        help="Target motor ids, for example '1,3,5' or 'all'.",
+        help="Target motor ids, for example '1,3,4' or 'all'.",
     )
     parser.add_argument(
         "--groups",

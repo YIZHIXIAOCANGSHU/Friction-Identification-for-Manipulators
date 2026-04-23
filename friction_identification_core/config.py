@@ -12,13 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("default.yaml")
 DEFAULT_TORQUE_LIMITS = np.array([40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0], dtype=np.float64)
 
+_LEGACY_CONTROL_KEYS = {"velocity_p_gain", "torque_limits"}
+_LEGACY_EXCITATION_KEYS = {"platforms", "transition_duration"}
+
 
 def _as_int_tuple(values: Any) -> tuple[int, ...]:
     return tuple(int(item) for item in values)
-
-
-def _as_float_tuple(values: Any) -> tuple[float, ...]:
-    return tuple(float(item) for item in values)
 
 
 def _expand_float_vector(values: Any, size: int, *, name: str) -> np.ndarray:
@@ -39,12 +38,27 @@ def _required_float(raw: dict[str, Any], key: str, *, name: str) -> float:
         raise ValueError(f"{name} must be a number.") from exc
 
 
+def _required_int(raw: dict[str, Any], key: str, *, name: str) -> int:
+    if key not in raw:
+        raise ValueError(f"{name} is required.")
+    try:
+        return int(raw[key])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer.") from exc
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as handle:
         payload = yaml.safe_load(handle) or {}
     if not isinstance(payload, dict):
         raise ValueError("Config YAML root must be a mapping.")
     return payload
+
+
+def _reject_legacy_keys(raw: dict[str, Any], *, section: str, keys: set[str]) -> None:
+    for key in sorted(keys):
+        if key in raw:
+            raise ValueError(f"{section}.{key} is no longer supported.")
 
 
 @dataclass(frozen=True)
@@ -74,42 +88,38 @@ class SerialConfig:
 
 
 @dataclass(frozen=True)
-class ExcitationPlatformConfig:
-    speed: float | None
-    speed_ratio: float | None
-    settle_duration: float
-    steady_duration: float
-
-    def resolve_speed(self, *, max_velocity: float) -> float:
-        if self.speed_ratio is not None:
-            speed = float(self.speed_ratio) * float(max_velocity)
-        elif self.speed is not None:
-            speed = float(self.speed)
-        else:  # pragma: no cover - guarded by config validation
-            raise ValueError("Excitation platform must define either speed or speed_ratio.")
-
-        speed_limit = 0.90 * float(max_velocity)
-        if speed > speed_limit + 1.0e-12:
-            raise ValueError(
-                f"Excitation platform speed {speed:.6f} exceeds 0.90 * max_velocity ({speed_limit:.6f})."
-            )
-        return speed
-
-
-@dataclass(frozen=True)
 class ExcitationConfig:
     sample_rate: float
+    curve_type: str
     hold_start: float
     hold_end: float
-    transition_duration: float
-    platforms: tuple[ExcitationPlatformConfig, ...]
+    position_limit: float
+    velocity_utilization: float
+    base_frequency: float
+    steady_cycles: int
+    fade_in_cycles: int
+    fade_out_cycles: int
+    harmonic_multipliers: tuple[int, ...]
+    harmonic_weights: tuple[float, ...]
 
 
 @dataclass(frozen=True)
 class ControlConfig:
     max_velocity: np.ndarray
     max_torque: np.ndarray
-    velocity_p_gain: np.ndarray
+    position_gain: np.ndarray
+    velocity_gain: np.ndarray
+    zeroing_position_gain: np.ndarray
+    zeroing_velocity_gain: np.ndarray
+    zeroing_hard_velocity_limit: np.ndarray
+    zeroing_velocity_limit: np.ndarray
+    zeroing_position_tolerance: np.ndarray
+    zeroing_velocity_tolerance: np.ndarray
+    zeroing_required_frames: int
+    zeroing_timeout: float
+    speed_abort_ratio: np.ndarray
+    zero_target_velocity_threshold: np.ndarray
+    low_speed_abort_limit: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -119,13 +129,12 @@ class IdentificationConfig:
     huber_delta: float
     max_iterations: int
     min_samples: int
-    min_samples_per_platform: int
     min_direction_samples: int
     zero_velocity_threshold: float
     min_motion_span: float
     min_target_frame_ratio: float
     max_sequence_error_ratio: float
-    validation_stride: int
+    validation_velocity_band_edges_ratio: tuple[float, ...]
     validation_warmup_samples: int
     savgol_window: int
     savgol_polyorder: int
@@ -223,96 +232,152 @@ def _parse_serial(raw: dict[str, Any]) -> SerialConfig:
 
 
 def _parse_excitation(raw: dict[str, Any]) -> ExcitationConfig:
-    platforms_raw = raw.get("platforms")
-    if not isinstance(platforms_raw, list) or not platforms_raw:
-        raise ValueError("excitation.platforms must not be empty.")
+    _reject_legacy_keys(raw, section="excitation", keys=_LEGACY_EXCITATION_KEYS)
 
-    platforms: list[ExcitationPlatformConfig] = []
-    for index, platform_raw in enumerate(platforms_raw, start=1):
-        if not isinstance(platform_raw, dict):
-            raise ValueError(f"excitation.platforms[{index}] must be a mapping.")
-        has_speed = "speed" in platform_raw
-        has_speed_ratio = "speed_ratio" in platform_raw
-        if has_speed == has_speed_ratio:
-            raise ValueError(
-                f"excitation.platforms[{index}] must provide exactly one of speed or speed_ratio."
-            )
-        platforms.append(
-            ExcitationPlatformConfig(
-                speed=(
-                    _required_float(platform_raw, "speed", name=f"excitation.platforms[{index}].speed")
-                    if has_speed
-                    else None
-                ),
-                speed_ratio=(
-                    _required_float(
-                        platform_raw,
-                        "speed_ratio",
-                        name=f"excitation.platforms[{index}].speed_ratio",
-                    )
-                    if has_speed_ratio
-                    else None
-                ),
-                settle_duration=_required_float(
-                    platform_raw,
-                    "settle_duration",
-                    name=f"excitation.platforms[{index}].settle_duration",
-                ),
-                steady_duration=_required_float(
-                    platform_raw,
-                    "steady_duration",
-                    name=f"excitation.platforms[{index}].steady_duration",
-                ),
-            )
-        )
+    harmonic_multipliers = tuple(int(item) for item in raw.get("harmonic_multipliers", (1, 2, 3, 4, 5, 6)))
+    harmonic_weights = tuple(float(item) for item in raw.get("harmonic_weights", (1.0, 0.75, 0.55, 0.40, 0.30, 0.25)))
+    if not harmonic_multipliers:
+        raise ValueError("excitation.harmonic_multipliers must not be empty.")
+    if len(harmonic_multipliers) != len(harmonic_weights):
+        raise ValueError("excitation.harmonic_multipliers and excitation.harmonic_weights must have the same length.")
 
     return ExcitationConfig(
         sample_rate=float(raw.get("sample_rate", 200.0)),
-        hold_start=float(raw.get("hold_start", 1.5)),
-        hold_end=float(raw.get("hold_end", 1.5)),
-        transition_duration=float(raw.get("transition_duration", 0.4)),
-        platforms=tuple(platforms),
+        curve_type=str(raw.get("curve_type", "multisine")),
+        hold_start=float(raw.get("hold_start", 1.0)),
+        hold_end=float(raw.get("hold_end", 1.0)),
+        position_limit=float(raw.get("position_limit", 2.5)),
+        velocity_utilization=float(raw.get("velocity_utilization", 0.85)),
+        base_frequency=float(raw.get("base_frequency", 0.25)),
+        steady_cycles=int(raw.get("steady_cycles", 6)),
+        fade_in_cycles=int(raw.get("fade_in_cycles", 1)),
+        fade_out_cycles=int(raw.get("fade_out_cycles", 1)),
+        harmonic_multipliers=harmonic_multipliers,
+        harmonic_weights=harmonic_weights,
     )
 
 
 def _parse_control(raw: dict[str, Any], motor_count: int) -> ControlConfig:
-    max_velocity = _expand_float_vector(raw.get("max_velocity", 0.5), motor_count, name="control.max_velocity")
+    _reject_legacy_keys(raw, section="control", keys=_LEGACY_CONTROL_KEYS)
+
+    max_velocity = _expand_float_vector(raw.get("max_velocity", 1.0), motor_count, name="control.max_velocity")
+    max_torque = _expand_float_vector(raw.get("max_torque", DEFAULT_TORQUE_LIMITS), motor_count, name="control.max_torque")
+    position_gain = _expand_float_vector(raw.get("position_gain", 0.08), motor_count, name="control.position_gain")
+    velocity_gain = _expand_float_vector(raw.get("velocity_gain", 0.03), motor_count, name="control.velocity_gain")
+    zeroing_position_gain = _expand_float_vector(
+        raw.get("zeroing_position_gain", raw.get("position_gain", 0.8)),
+        motor_count,
+        name="control.zeroing_position_gain",
+    )
+    zeroing_velocity_gain = _expand_float_vector(
+        raw.get("zeroing_velocity_gain", raw.get("velocity_gain", 0.18)),
+        motor_count,
+        name="control.zeroing_velocity_gain",
+    )
+    zeroing_hard_velocity_limit = _expand_float_vector(
+        raw.get("zeroing_hard_velocity_limit", 2.0),
+        motor_count,
+        name="control.zeroing_hard_velocity_limit",
+    )
+    zeroing_velocity_limit = _expand_float_vector(
+        raw.get("zeroing_velocity_limit", 0.40),
+        motor_count,
+        name="control.zeroing_velocity_limit",
+    )
+    zeroing_position_tolerance = _expand_float_vector(
+        raw.get("zeroing_position_tolerance", 0.02),
+        motor_count,
+        name="control.zeroing_position_tolerance",
+    )
+    zeroing_velocity_tolerance = _expand_float_vector(
+        raw.get("zeroing_velocity_tolerance", 0.02),
+        motor_count,
+        name="control.zeroing_velocity_tolerance",
+    )
+    speed_abort_ratio = _expand_float_vector(raw.get("speed_abort_ratio", 1.20), motor_count, name="control.speed_abort_ratio")
+    zero_target_velocity_threshold = _expand_float_vector(
+        raw.get("zero_target_velocity_threshold", 0.02),
+        motor_count,
+        name="control.zero_target_velocity_threshold",
+    )
+    low_speed_abort_limit = _expand_float_vector(
+        raw.get("low_speed_abort_limit", 0.08),
+        motor_count,
+        name="control.low_speed_abort_limit",
+    )
+
+    zeroing_required_frames = int(raw.get("zeroing_required_frames", 8))
+    zeroing_timeout = float(raw.get("zeroing_timeout", 8.0))
+
     if np.any(max_velocity <= 0.0):
         raise ValueError("control.max_velocity must all be > 0.")
-    max_torque = _expand_float_vector(
-        raw.get("max_torque", raw.get("torque_limits", DEFAULT_TORQUE_LIMITS)),
-        motor_count,
-        name="control.max_torque",
-    )
     if np.any(max_torque <= 0.0):
         raise ValueError("control.max_torque must all be > 0.")
-    velocity_p_gain = _expand_float_vector(raw.get("velocity_p_gain", 1.0), motor_count, name="control.velocity_p_gain")
-    if np.any(velocity_p_gain < 0.0):
-        raise ValueError("control.velocity_p_gain must all be >= 0.")
+    if np.any(position_gain < 0.0):
+        raise ValueError("control.position_gain must all be >= 0.")
+    if np.any(velocity_gain < 0.0):
+        raise ValueError("control.velocity_gain must all be >= 0.")
+    if np.any(zeroing_position_gain < 0.0):
+        raise ValueError("control.zeroing_position_gain must all be >= 0.")
+    if np.any(zeroing_velocity_gain < 0.0):
+        raise ValueError("control.zeroing_velocity_gain must all be >= 0.")
+    if np.any(zeroing_hard_velocity_limit <= 0.0):
+        raise ValueError("control.zeroing_hard_velocity_limit must all be > 0.")
+    if np.any(zeroing_velocity_limit <= 0.0):
+        raise ValueError("control.zeroing_velocity_limit must all be > 0.")
+    if np.any(zeroing_position_tolerance < 0.0):
+        raise ValueError("control.zeroing_position_tolerance must all be >= 0.")
+    if np.any(zeroing_velocity_tolerance <= 0.0):
+        raise ValueError("control.zeroing_velocity_tolerance must all be > 0.")
+    if zeroing_required_frames <= 0:
+        raise ValueError("control.zeroing_required_frames must be > 0.")
+    if zeroing_timeout <= 0.0:
+        raise ValueError("control.zeroing_timeout must be > 0.")
+    if np.any(speed_abort_ratio < 1.0):
+        raise ValueError("control.speed_abort_ratio must all be >= 1.0.")
+    if np.any(zero_target_velocity_threshold < 0.0):
+        raise ValueError("control.zero_target_velocity_threshold must all be >= 0.")
+    if np.any(low_speed_abort_limit <= 0.0):
+        raise ValueError("control.low_speed_abort_limit must all be > 0.")
+
     return ControlConfig(
         max_velocity=max_velocity,
         max_torque=max_torque,
-        velocity_p_gain=velocity_p_gain,
+        position_gain=position_gain,
+        velocity_gain=velocity_gain,
+        zeroing_position_gain=zeroing_position_gain,
+        zeroing_velocity_gain=zeroing_velocity_gain,
+        zeroing_hard_velocity_limit=zeroing_hard_velocity_limit,
+        zeroing_velocity_limit=zeroing_velocity_limit,
+        zeroing_position_tolerance=zeroing_position_tolerance,
+        zeroing_velocity_tolerance=zeroing_velocity_tolerance,
+        zeroing_required_frames=zeroing_required_frames,
+        zeroing_timeout=zeroing_timeout,
+        speed_abort_ratio=speed_abort_ratio,
+        zero_target_velocity_threshold=zero_target_velocity_threshold,
+        low_speed_abort_limit=low_speed_abort_limit,
     )
 
 
 def _parse_identification(raw: dict[str, Any]) -> IdentificationConfig:
     velocity_scale_candidates = tuple(float(item) for item in raw.get("velocity_scale_candidates", (0.01, 0.02, 0.05)))
+    band_edges = tuple(float(item) for item in raw.get("validation_velocity_band_edges_ratio", (0.05, 0.12, 0.25, 0.40, 0.60, 0.85)))
     if not velocity_scale_candidates:
         raise ValueError("identification.velocity_scale_candidates must not be empty.")
+    if len(band_edges) < 2:
+        raise ValueError("identification.validation_velocity_band_edges_ratio must contain at least two edges.")
     return IdentificationConfig(
         group_count=max(int(raw.get("group_count", 1)), 1),
         regularization=float(raw.get("regularization", 1.0e-6)),
         huber_delta=float(raw.get("huber_delta", 1.5)),
         max_iterations=max(int(raw.get("max_iterations", 12)), 1),
         min_samples=max(int(raw.get("min_samples", 200)), 1),
-        min_samples_per_platform=max(int(raw.get("min_samples_per_platform", 120)), 1),
         min_direction_samples=max(int(raw.get("min_direction_samples", 300)), 1),
         zero_velocity_threshold=max(float(raw.get("zero_velocity_threshold", 0.015)), 0.0),
         min_motion_span=max(float(raw.get("min_motion_span", 0.05)), 0.0),
         min_target_frame_ratio=float(np.clip(raw.get("min_target_frame_ratio", 0.7), 0.0, 1.0)),
         max_sequence_error_ratio=max(float(raw.get("max_sequence_error_ratio", 0.2)), 0.0),
-        validation_stride=max(int(raw.get("validation_stride", 5)), 1),
+        validation_velocity_band_edges_ratio=band_edges,
         validation_warmup_samples=max(int(raw.get("validation_warmup_samples", 20)), 0),
         savgol_window=max(int(raw.get("savgol_window", 31)), 3),
         savgol_polyorder=max(int(raw.get("savgol_polyorder", 3)), 1),
@@ -328,7 +393,7 @@ def _parse_output(raw: dict[str, Any], *, project_root: Path) -> OutputConfig:
         results_dir=results_dir,
         summary_filename=str(raw.get("summary_filename", "hardware_identification_summary.npz")),
         summary_csv_filename=str(raw.get("summary_csv_filename", "hardware_identification_summary.csv")),
-        summary_report_filename=str(raw.get("summary_report_filename", "hardware_identification_report.md")),
+        summary_report_filename=str(raw.get("summary_report_filename", "hardware_identification_summary.md")),
     )
 
 
@@ -351,29 +416,44 @@ def load_config(path: str | Path) -> Config:
 
     if config.excitation.sample_rate <= 0.0:
         raise ValueError("excitation.sample_rate must be > 0.")
+    if config.excitation.curve_type != "multisine":
+        raise ValueError("excitation.curve_type must be 'multisine'.")
     if config.excitation.hold_start < 0.0:
         raise ValueError("excitation.hold_start must be >= 0.")
     if config.excitation.hold_end < 0.0:
         raise ValueError("excitation.hold_end must be >= 0.")
-    if config.excitation.transition_duration < 0.0:
-        raise ValueError("excitation.transition_duration must be >= 0.")
-    if not config.excitation.platforms:
-        raise ValueError("excitation.platforms must not be empty.")
-    for index, platform in enumerate(config.excitation.platforms, start=1):
-        if (platform.speed is None) == (platform.speed_ratio is None):
-            raise ValueError(f"excitation.platforms[{index}] must define exactly one of speed or speed_ratio.")
-        if platform.speed is not None and platform.speed <= 0.0:
-            raise ValueError(f"excitation.platforms[{index}].speed must be > 0.")
-        if platform.speed_ratio is not None and not (0.0 < platform.speed_ratio <= 0.90):
-            raise ValueError(f"excitation.platforms[{index}].speed_ratio must be within (0, 0.90].")
-        if platform.settle_duration <= 0.0:
-            raise ValueError(f"excitation.platforms[{index}].settle_duration must be > 0.")
-        if platform.steady_duration <= 0.0:
-            raise ValueError(f"excitation.platforms[{index}].steady_duration must be > 0.")
+    if config.excitation.position_limit <= 0.0:
+        raise ValueError("excitation.position_limit must be > 0.")
+    if not (0.0 < config.excitation.velocity_utilization <= 1.0):
+        raise ValueError("excitation.velocity_utilization must be within (0, 1].")
+    if config.excitation.base_frequency <= 0.0:
+        raise ValueError("excitation.base_frequency must be > 0.")
+    if config.excitation.steady_cycles <= 0:
+        raise ValueError("excitation.steady_cycles must be > 0.")
+    if config.excitation.fade_in_cycles < 0:
+        raise ValueError("excitation.fade_in_cycles must be >= 0.")
+    if config.excitation.fade_out_cycles < 0:
+        raise ValueError("excitation.fade_out_cycles must be >= 0.")
+    if any(multiplier <= 0 for multiplier in config.excitation.harmonic_multipliers):
+        raise ValueError("excitation.harmonic_multipliers must all be > 0.")
+    if len(set(config.excitation.harmonic_multipliers)) != len(config.excitation.harmonic_multipliers):
+        raise ValueError("excitation.harmonic_multipliers must be unique.")
+    if any(weight <= 0.0 for weight in config.excitation.harmonic_weights):
+        raise ValueError("excitation.harmonic_weights must all be > 0.")
+    edges = np.asarray(config.identification.validation_velocity_band_edges_ratio, dtype=np.float64)
+    if np.any(~np.isfinite(edges)) or np.any(edges <= 0.0) or np.any(edges > 1.0):
+        raise ValueError("identification.validation_velocity_band_edges_ratio must contain values within (0, 1].")
+    if np.any(np.diff(edges) <= 0.0):
+        raise ValueError("identification.validation_velocity_band_edges_ratio must be strictly increasing.")
     return config
 
 
-def _parse_motor_override(raw: str | None, available_ids: tuple[int, ...]) -> tuple[int, ...] | None:
+def _parse_motor_override(
+    raw: str | None,
+    available_ids: tuple[int, ...],
+    *,
+    source_name: str = "config motors.ids",
+) -> tuple[int, ...] | None:
     if raw is None:
         return None
     text = str(raw).strip().lower()
@@ -390,7 +470,7 @@ def _parse_motor_override(raw: str | None, available_ids: tuple[int, ...]) -> tu
             continue
         motor_id = int(token)
         if motor_id not in available_ids:
-            raise ValueError(f"motor_id {motor_id} is not present in config motors.ids.")
+            raise ValueError(f"motor_id {motor_id} is not present in {source_name}.")
         if motor_id in seen:
             continue
         parsed.append(motor_id)
@@ -414,7 +494,11 @@ def apply_overrides(
             output=replace(updated.output, results_dir=updated.resolve_project_path(output)),
         )
 
-    overridden_motor_ids = _parse_motor_override(motors, updated.motor_ids)
+    overridden_motor_ids = _parse_motor_override(
+        motors,
+        updated.enabled_motor_ids,
+        source_name="config motors.enabled",
+    )
     if overridden_motor_ids is not None:
         updated = replace(updated, motors=replace(updated.motors, enabled_ids=overridden_motor_ids))
 

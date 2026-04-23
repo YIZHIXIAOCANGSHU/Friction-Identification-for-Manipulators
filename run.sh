@@ -16,7 +16,7 @@ Usage:
 
 Notes:
   - `./run.sh` 会启动交互式数字向导。
-  - `./run.sh identify --motors 1,3,5` 这类旧式非交互调用已不再支持。
+  - `./run.sh identify --motors 1,3,4` 这类旧式非交互调用已不再支持。
   - 自动化或脚本化调用请改用：
       python3 -m friction_identification_core --mode identify --config friction_identification_core/default.yaml
 EOF
@@ -69,7 +69,7 @@ read_custom_motors() {
     local result_var="$1"
     local motors_input
     while true; do
-        printf '请输入 motor id 列表（例如 1,3,5，或 all）: '
+        printf '请输入 motor id 列表（例如 1,3,4，或 all）: '
         IFS= read -r motors_input || exit 1
         if [[ "$motors_input" == "all" || "$motors_input" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
             printf -v "$result_var" '%s' "$motors_input"
@@ -117,7 +117,7 @@ CONFIG_PATH="$DEFAULT_CONFIG_FILE"
 
 print_menu "电机菜单" \
     "1. all" \
-    "2. 输入 motor id 列表，例如 1,3,5"
+    "2. 输入 motor id 列表，例如 1,3,4"
 motors_choice=""
 read_menu_choice motors_choice '请选择电机: ' 1 2
 MOTORS="all"

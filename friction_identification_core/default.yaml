@@ -1,9 +1,10 @@
-# 电机基础配置。
-# `ids` / `names` 必须一一对应，`enabled` 必须是 `ids` 的子集。
+# 默认硬件辨识配置。
+# 下面的注释主要说明运行约束和调参方向，不改动当前参数取值。
+
+# 电机拓扑与本次运行启用列表。
+# `ids` / `names` 需要一一对应，`enabled` 必须是 `ids` 的子集。
 motors:
-  # 总线上实际存在的电机 ID；配置解析时要求为连续递增序列。
   ids: [1, 2, 3, 4, 5, 6, 7]
-  # 与 `ids` 按顺序一一对应的人类可读名称。
   names:
     - "motor_01"
     - "motor_02"
@@ -12,123 +13,103 @@ motors:
     - "motor_05"
     - "motor_06"
     - "motor_07"
-  # 本次运行启用哪些电机；可用于只跑部分关节而不改完整拓扑。
-  enabled: [1, 2, 3, 4, 5, 6, 7]
+  # 默认只辨识 1~4 号电机；5~7 号仍保留反馈接收，但不进入辨识/下发轮次。
+  enabled: [1, 2, 3, 4]
 
 # 串口采集与起始同步配置。
+# 正式采集前，需要先连续收到目标电机若干帧合法反馈。
 serial:
-  # USB 串口设备路径。
   port: "/dev/ttyUSB0"
-  # 串口波特率，需要与下位机设置一致。
   baudrate: 115200
-  # 单次读超时，单位秒。
   read_timeout: 0.02
-  # 单次写超时，单位秒。
   write_timeout: 0.02
-  # 每次底层读取的最大字节数；解析器会自动拼接完整帧。
   read_chunk_size: 256
-  # 每轮采集前先清空输入缓冲，避免上一轮残留数据污染同步。
+  # 每轮开始前清空残留输入，避免上一轮旧帧污染本轮同步。
   flush_input_before_round: true
-  # 开始正式采集前，等待同步成功的最长时间，单位秒。
   sync_timeout: 2.0
-  # 进入正式采集前，目标电机至少需要命中这么多次合法反馈帧。
   sync_cycles_required: 3
 
-# 激励轨迹配置。
-# 单轮过程固定为：
-# hold_start -> 正向平台 -> transition_mid_zero -> 反向平台 -> transition_end_zero -> hold_end。
+# 固定使用零中心 `multisine` 位置激励。
+# 单轮相位顺序为：hold_start -> fade_in -> excitation_cycle_* -> fade_out -> hold_end。
 excitation:
-  # 参考轨迹采样率，单位 Hz。
   sample_rate: 200.0
-  # 运动开始前的零速保持时间，给系统留出稳定与同步缓冲。
+  # 当前实现只支持 `multisine`，不要改成别的字符串。
+  curve_type: "multisine"
   hold_start: 1.0
-  # 运动结束后的零速保持时间，便于收尾与记录末段数据。
   hold_end: 1.0
-  # 正反向平台之间，以及反向结束回零时使用的统一过渡时间，单位秒。
-  transition_duration: 0.35
-  # 显式定义每个速度平台，按列表顺序依次执行。
-  # 每个平台都会经历“加速进入该档位 -> 等待瞬态衰减 -> 稳态采样”三个阶段，
-  # 然后在 `transition_duration` 内回到零速或切到下一段反向轨迹。
-  # `speed_ratio` 会在运行时换算成 `speed_ratio * max_velocity`，因此这里填的是相对比例而不是绝对速度。
-  # 一般来说，低速档更有助于观察库仑摩擦和死区，高速档更有助于分离黏性摩擦项。
-  platforms:
-    # 第 1 档：低速试探段，优先覆盖起步附近的摩擦特性。
-    - speed_ratio: 0.12
-      # 到达目标速度后先留一小段稳定时间，避开加减速瞬态。
-      settle_duration: 1.00
-      # 真正用于稳态统计与参数拟合的数据窗口长度。
-      steady_duration: 2.50
-    # 第 2 档：低中速段，在保证稳定性的同时增加速度覆盖范围。
-    - speed_ratio: 0.28
-      settle_duration: 1.50
-      steady_duration: 3.00
-    # 第 3 档：中速段，通常是兼顾信噪比和时长的主力平台。
-    - speed_ratio: 0.50
-      settle_duration: 2.00
-      steady_duration: 3.50
-    # 第 4 档：中高速段，帮助区分速度相关项并观察更明显的黏性趋势。
-    - speed_ratio: 0.72
-      settle_duration: 3.00
-      steady_duration: 4.50
-    # 第 5 档：接近上限的高速段，用于补足高速度区间信息。
-    # 由于速度更高、系统瞬态更明显，通常需要更长的稳定和采样时间。
-    - speed_ratio: 0.90
-      settle_duration: 5.00
-      steady_duration: 5.00
+  position_limit: 2.5
+  # 轨迹速度峰值会被限制在 `velocity_utilization * control.max_velocity` 以内。
+  velocity_utilization: 1
+  # 基频越低，单个激励周期越长，总采集时长也会随之增加。
+  base_frequency: 0.20
+  steady_cycles: 6
+  # 当前默认值对应约 10s 的平滑起坡 / 落坡，减少过快的上下变化。
+  fade_in_cycles: 2
+  fade_out_cycles: 2
+  # 频率成分与相对权重需一一对应；运行时会用 Schroeder 相位降低峰值因子。
+  harmonic_multipliers: [1, 2, 3, 4, 5, 6]
+  harmonic_weights: [1.0, 0.75, 0.55, 0.40, 0.30, 0.25]
 
-# 控制器限幅。
+# 控制器增益、归零判定和运行期保护阈值。
+# 这些参数既支持标量广播，也支持按电机 ID 顺序提供数组。
 control:
-  # 参考轨迹与速度平台使用的最大速度；标量会广播到所有电机。
-  max_velocity: 1
-  # 绝对速度环 P 系数，直接按 `torque = P * velocity_error` 计算；标量会广播到所有电机。
-  velocity_p_gain: 0.1
-  # 每个电机的扭矩限幅；列表长度需与电机数量一致。
+  # 参考轨迹使用的基础速度上限，真正峰值还会再乘 `velocity_utilization`。
+  max_velocity: 1.0
   max_torque: [40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0]
+  # `identify` 正式采集阶段使用的基础 PD 位置/速度反馈增益。
+  # `compensate` 当前只复用已辨识出的前馈参数，不走这组绝对式 PD。
+  # 顺序按 motor id 1..7 展开；当前按 [1,2] / [3,4] / [5,6,7] 三组填写。
+  position_gain: [1, 4, 4, 4, 0.05, 0.05, 0.05]
+  velocity_gain: [0.5, 2, 2, 2, 0.025, 0.025, 0.025]
+  # `identify` 的预归零阶段同样按 [1,2] / [3,4] / [5,6,7] 三组填写。
+  zeroing_position_gain: [4, 4, 4, 4, 0.4, 0.3, 0.3]
+  zeroing_velocity_gain: [2, 2, 2, 2, 0.2, 0.14, 0.14]
+  # 预归零阶段的硬速度保护阈值；超过它会直接触发 abort。
+  zeroing_hard_velocity_limit: 2.0
+  # 这个阈值只用于判断是否进入 0 点附近的最终锁定窗口。
+  zeroing_velocity_limit: 0.40
+  zeroing_position_tolerance: 0.2
+  zeroing_velocity_tolerance: 0.02
+  zeroing_required_frames: 8
+  zeroing_timeout: 8.0
+  # 运行中速度保护阈值为：
+  # max(low_speed_abort_limit, speed_abort_ratio * |当前相位理论速度|)。
+  speed_abort_ratio: 1.20
+  # 理论速度低于该阈值时，不再强制按速度方向匹配参考点，减少零速附近误判。
+  zero_target_velocity_threshold: 0.02
+  # 即使理论速度很小，也至少保留这一条绝对速度保护下限。
+  low_speed_abort_limit: 0.08
 
-# 摩擦辨识配置。
-# 当前模型形式近似为：tau = coulomb * tanh(v / scale) + viscous * v + offset。
+# 静态摩擦辨识与质量门限。
+# 当前静态模型近似为：tau = coulomb * tanh(v / scale) + viscous * v + offset。
 identification:
-  # 默认分组数；可被命令行 `--groups` 覆盖。
+  # 默认分组数，可被命令行 `--groups` 覆盖。
   group_count: 1
-  # Ridge 正则系数，防止求解病态或过拟合。
   regularization: 1.0e-6
-  # Huber 鲁棒权重阈值；越小越容易压低离群点影响。
   huber_delta: 1.5
-  # IRLS 鲁棒回归的最大迭代次数。
+  # 拟合前的最小样本门槛：总样本数以及正反方向样本数。
   max_iterations: 12
-  # 至少需要这么多有效稳态样本才会执行辨识。
   min_samples: 200
-  # 每个稳态平台在过滤后至少要保留的样本数。
-  min_samples_per_platform: 120
-  # 正向与反向样本各自至少要达到的样本数。
   min_direction_samples: 300
-  # 小于该速度阈值时视为接近静止，不参与有效稳态样本筛选。
+  # 低于零速阈值的点会被视为接近静止；运动跨度太小的数据也会被判为不可靠。
   zero_velocity_threshold: 0.015
-  # 有效样本的最小位置跨度；太小说明运动不足，结果不可靠。
   min_motion_span: 0.05
-  # 目标电机有效帧占整轮采样的最低比例，低于此值会判定采样不足。
+  # 采样质量门限：目标电机有效帧比例过低或序列错误比例过高时，本轮会被拒绝。
   min_target_frame_ratio: 0.7
-  # 允许的最大序列错误比例，过高会直接放弃该轮数据。
-  # 兼容保留字段：当前版本不再依赖总线顺序做同步或判废。
   max_sequence_error_ratio: 0.2
-  # 预留给验证抽样策略的步长参数；当前版本已解析，但未进入主流程。
-  validation_stride: 5
-  # 预留给验证阶段的预热样本数；当前版本已解析，但未进入主流程。
+  # 按 `max_velocity` 的比例划分验证速度带，用于速度分带 holdout 评估。
+  validation_velocity_band_edges_ratio: [0.05, 0.12, 0.25, 0.40, 0.60, 0.85]
   validation_warmup_samples: 20
-  # Savitzky-Golay 速度平滑窗口长度；代码里会自动修正为合法奇数窗口。
+  # Savitzky-Golay 速度平滑参数；窗口长度会在运行时自动修正为合法奇数。
   savgol_window: 31
-  # Savitzky-Golay 平滑多项式阶数。
   savgol_polyorder: 3
-  # `tanh(v / scale)` 的初始候选尺度，运行时还会结合数据动态补充候选值。
+  # `tanh(v / scale)` 的初始候选尺度；运行时还会结合数据动态补充候选值。
   velocity_scale_candidates: [0.01, 0.02, 0.05]
 
-# 输出文件与汇总命名配置。
+# 输出目录与汇总文件命名。
+# `results_dir` 如果填相对路径，会按项目根目录解析。
 output:
-  # 结果根目录；相对路径会按项目根目录解析。
   results_dir: "results"
-  # 二进制汇总文件名（NumPy `.npz`）。
   summary_filename: "hardware_identification_summary.npz"
-  # 表格汇总文件名（CSV）。
   summary_csv_filename: "hardware_identification_summary.csv"
-  # Markdown 汇总报告文件名。
-  summary_report_filename: "hardware_identification_report.md"
+  summary_report_filename: "hardware_identification_summary.md"

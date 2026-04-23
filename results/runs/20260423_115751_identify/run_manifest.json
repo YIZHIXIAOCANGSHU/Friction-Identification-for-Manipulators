@@ -1,0 +1,29 @@
+{
+  "run_label": "20260423_115751_identify",
+  "mode": "identify",
+  "start_time": "2026-04-23T03:57:51+00:00",
+  "end_time": "2026-04-23T03:57:57+00:00",
+  "group_count": 1,
+  "motor_order": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "capture_files": [],
+  "identification_files": [],
+  "dynamic_identification_files": [],
+  "summary_files": {},
+  "rerun_recording_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/results/runs/20260423_115751_identify/identify.rrd",
+  "config_path": "/home/luwen/桌面/参数4.8_摩擦力辨识/friction_identification_core/default.yaml",
+  "abort_event": {
+    "reason": "velocity_limit_exceeded",
+    "stage": "identify",
+    "motor_id": 1,
+    "group_index": 1,
+    "round_index": 1,
+    "phase_name": "excitation_cycle_01",
+    "observed_velocity": 0.6043968200683594,
+    "velocity_limit": 0.4602574746366697
+  }
+}

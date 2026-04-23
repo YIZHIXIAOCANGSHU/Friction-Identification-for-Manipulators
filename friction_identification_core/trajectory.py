@@ -6,143 +6,109 @@ from friction_identification_core.config import ExcitationConfig
 from friction_identification_core.models import ReferenceTrajectory
 
 
-def _segment_slice(time: np.ndarray, start_s: float, duration_s: float) -> slice:
-    end_s = start_s + duration_s
-    epsilon = 1.0e-12
-    start_index = int(np.searchsorted(time, start_s - epsilon, side="left"))
-    end_index = int(np.searchsorted(time, end_s - epsilon, side="left"))
-    return slice(start_index, end_index)
+def _schroeder_phases(harmonic_count: int) -> np.ndarray:
+    indices = np.arange(harmonic_count, dtype=np.float64)
+    return -np.pi * indices * (indices - 1.0) / max(float(harmonic_count), 1.0)
 
 
-def _blend_segment(
-    *,
+def _excitation_envelope(
     time: np.ndarray,
-    velocity_cmd: np.ndarray,
-    phase_name: np.ndarray,
-    start_s: float,
-    duration_s: float,
-    start_velocity: float,
-    end_velocity: float,
-    phase: str,
-) -> None:
-    if duration_s <= 0.0:
-        return
-    segment = _segment_slice(time, start_s, duration_s)
-    if segment.start >= segment.stop:
-        return
-    segment_time = time[segment]
-    u = np.clip((segment_time - start_s) / duration_s, 0.0, 1.0)
-    blend = 0.5 - 0.5 * np.cos(np.pi * u)
-    velocity_cmd[segment] = start_velocity + (end_velocity - start_velocity) * blend
-    phase_name[segment] = phase
-
-
-def _hold_segment(
     *,
-    time: np.ndarray,
-    velocity_cmd: np.ndarray,
-    phase_name: np.ndarray,
-    start_s: float,
-    duration_s: float,
-    velocity: float,
-    phase: str,
-) -> None:
-    if duration_s <= 0.0:
-        return
-    segment = _segment_slice(time, start_s, duration_s)
-    if segment.start >= segment.stop:
-        return
-    velocity_cmd[segment] = velocity
-    phase_name[segment] = phase
+    fade_in_duration: float,
+    steady_duration: float,
+    fade_out_duration: float,
+) -> np.ndarray:
+    envelope = np.ones_like(time, dtype=np.float64)
+    if fade_in_duration > 0.0:
+        fade_in_mask = time < fade_in_duration
+        u = np.clip(time[fade_in_mask] / fade_in_duration, 0.0, 1.0)
+        envelope[fade_in_mask] = 0.5 - 0.5 * np.cos(np.pi * u)
+    if fade_out_duration > 0.0:
+        fade_out_start = fade_in_duration + steady_duration
+        fade_out_mask = time >= fade_out_start
+        u = np.clip((time[fade_out_mask] - fade_out_start) / fade_out_duration, 0.0, 1.0)
+        envelope[fade_out_mask] = 0.5 + 0.5 * np.cos(np.pi * u)
+    return np.clip(envelope, 0.0, 1.0)
 
 
 def build_reference_trajectory(config: ExcitationConfig, *, max_velocity: float) -> ReferenceTrajectory:
     sample_rate = max(float(config.sample_rate), 1.0)
     dt = 1.0 / sample_rate
-    segment_specs: list[tuple[str, float, float, str]] = [
-        ("hold_start", 0.0, float(config.hold_start), "hold"),
-    ]
-    for level_index, platform in enumerate(config.platforms, start=1):
-        platform_speed = float(platform.resolve_speed(max_velocity=float(max_velocity)))
-        segment_specs.extend(
-            (
-                (
-                    f"settle_forward_{level_index:02d}",
-                    platform_speed,
-                    float(platform.settle_duration),
-                    "blend",
-                ),
-                (
-                    f"steady_forward_{level_index:02d}",
-                    platform_speed,
-                    float(platform.steady_duration),
-                    "hold",
-                ),
-            )
-        )
-    segment_specs.append(("transition_mid_zero", 0.0, float(config.transition_duration), "blend"))
-    for level_index, platform in enumerate(config.platforms, start=1):
-        platform_speed = float(platform.resolve_speed(max_velocity=float(max_velocity)))
-        segment_specs.extend(
-            (
-                (
-                    f"settle_reverse_{level_index:02d}",
-                    -platform_speed,
-                    float(platform.settle_duration),
-                    "blend",
-                ),
-                (
-                    f"steady_reverse_{level_index:02d}",
-                    -platform_speed,
-                    float(platform.steady_duration),
-                    "hold",
-                ),
-            )
-        )
-    segment_specs.append(("transition_end_zero", 0.0, float(config.transition_duration), "blend"))
-    segment_specs.append(("hold_end", 0.0, float(config.hold_end), "hold"))
-
-    total_duration = max(sum(duration for _, _, duration, _ in segment_specs), dt)
+    cycle_duration = 1.0 / float(config.base_frequency)
+    fade_in_duration = float(config.fade_in_cycles) * cycle_duration
+    steady_duration = float(config.steady_cycles) * cycle_duration
+    fade_out_duration = float(config.fade_out_cycles) * cycle_duration
+    excitation_duration = fade_in_duration + steady_duration + fade_out_duration
+    total_duration = float(config.hold_start) + excitation_duration + float(config.hold_end)
     sample_count = max(int(np.ceil(total_duration * sample_rate - 1.0e-9)), 2)
 
     time = np.arange(sample_count, dtype=np.float64) * dt
+    position_cmd = np.zeros(sample_count, dtype=np.float64)
     velocity_cmd = np.zeros(sample_count, dtype=np.float64)
+    acceleration_cmd = np.zeros(sample_count, dtype=np.float64)
     phase_name = np.full(sample_count, "hold_end", dtype="<U32")
 
-    segment_durations = np.asarray([duration for _, _, duration, _ in segment_specs], dtype=np.float64)
-    segment_start_times = np.concatenate(([0.0], np.cumsum(segment_durations[:-1], dtype=np.float64)))
+    hold_start_end = float(config.hold_start)
+    excitation_end = hold_start_end + excitation_duration
+    hold_start_mask = time < hold_start_end
+    hold_end_mask = time >= excitation_end
+    excitation_mask = (~hold_start_mask) & (~hold_end_mask)
 
-    current_velocity = 0.0
-    for (segment_name, target_velocity, segment_duration, segment_mode), start_time in zip(
-        segment_specs,
-        segment_start_times,
-    ):
-        if segment_mode == "hold":
-            _hold_segment(
-                time=time,
-                velocity_cmd=velocity_cmd,
-                phase_name=phase_name,
-                start_s=float(start_time),
-                duration_s=segment_duration,
-                velocity=float(target_velocity),
-                phase=str(segment_name),
-            )
-        else:
-            _blend_segment(
-                time=time,
-                velocity_cmd=velocity_cmd,
-                phase_name=phase_name,
-                start_s=float(start_time),
-                duration_s=segment_duration,
-                start_velocity=float(current_velocity),
-                end_velocity=float(target_velocity),
-                phase=str(segment_name),
-            )
-        current_velocity = float(target_velocity)
+    phase_name[hold_start_mask] = "hold_start"
+    phase_name[hold_end_mask] = "hold_end"
 
-    acceleration_cmd = np.gradient(velocity_cmd, dt)
-    position_cmd = np.zeros(sample_count, dtype=np.float64)
-    position_cmd[1:] = np.cumsum((velocity_cmd[:-1] + velocity_cmd[1:]) * 0.5 * dt)
+    if np.any(excitation_mask):
+        excitation_time = time[excitation_mask] - hold_start_end
+        envelope = _excitation_envelope(
+            excitation_time,
+            fade_in_duration=fade_in_duration,
+            steady_duration=steady_duration,
+            fade_out_duration=fade_out_duration,
+        )
+        phases = _schroeder_phases(len(config.harmonic_multipliers))
+        q_raw = np.zeros(excitation_time.size, dtype=np.float64)
+        for multiplier, weight, phase in zip(config.harmonic_multipliers, config.harmonic_weights, phases):
+            omega = 2.0 * np.pi * float(multiplier) * float(config.base_frequency)
+            q_raw += float(weight) * np.sin(omega * excitation_time + float(phase))
+        q_unit = envelope * q_raw
+        if np.any(envelope > 0.0):
+            q_unit -= float(np.mean(q_unit[envelope > 0.0])) * envelope
+        v_unit = np.gradient(q_unit, dt)
+        a_unit = np.gradient(v_unit, dt)
+
+        max_abs_position = max(float(np.max(np.abs(q_unit))), 1.0e-9)
+        max_abs_velocity = max(float(np.max(np.abs(v_unit))), 1.0e-9)
+        scale = min(
+            float(config.position_limit) / max_abs_position,
+            float(config.velocity_utilization) * float(max_velocity) / max_abs_velocity,
+        )
+
+        position_cmd[excitation_mask] = scale * q_unit
+        velocity_cmd[excitation_mask] = scale * v_unit
+        acceleration_cmd[excitation_mask] = scale * a_unit
+
+        fade_in_end = fade_in_duration
+        steady_end = fade_in_duration + steady_duration
+        fade_out_end = fade_in_duration + steady_duration + fade_out_duration
+        for local_index, t_exc in zip(np.flatnonzero(excitation_mask), excitation_time):
+            if t_exc < fade_in_end:
+                phase_name[local_index] = "fade_in"
+                continue
+            if t_exc < steady_end:
+                cycle_index = int(np.floor((t_exc - fade_in_duration) / cycle_duration)) + 1
+                cycle_index = min(max(cycle_index, 1), int(config.steady_cycles))
+                phase_name[local_index] = f"excitation_cycle_{cycle_index:02d}"
+                continue
+            if t_exc < fade_out_end:
+                phase_name[local_index] = "fade_out"
+
+    position_max = float(np.max(np.abs(position_cmd)))
+    velocity_max = float(np.max(np.abs(velocity_cmd)))
+    velocity_limit = float(config.velocity_utilization) * float(max_velocity)
+    if position_max > float(config.position_limit) + 1.0e-9:
+        raise ValueError("Reference trajectory exceeds excitation.position_limit.")
+    if velocity_max > velocity_limit + 1.0e-9:
+        raise ValueError("Reference trajectory exceeds excitation.velocity_utilization * control.max_velocity.")
 
     return ReferenceTrajectory(
         time=time,
@@ -150,5 +116,5 @@ def build_reference_trajectory(config: ExcitationConfig, *, max_velocity: float)
         velocity_cmd=velocity_cmd,
         acceleration_cmd=acceleration_cmd,
         phase_name=phase_name,
-        duration_s=total_duration,
+        duration_s=float(total_duration),
     )

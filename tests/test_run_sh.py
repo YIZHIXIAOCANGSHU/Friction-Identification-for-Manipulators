@@ -64,7 +64,7 @@ class RunShInteractionTests(unittest.TestCase):
                 [
                     "1",
                     "2",
-                    "1,3,5",
+                    "1,3,4",
                     "",
                 ]
             ),
@@ -82,7 +82,7 @@ class RunShInteractionTests(unittest.TestCase):
                 "--config",
                 "friction_identification_core/default.yaml",
                 "--motors",
-                "1,3,5",
+                "1,3,4",
                 "--output",
                 "results",
             ],

@@ -23,11 +23,16 @@ class ReferenceTrajectory:
     phase_name: np.ndarray
     duration_s: float
 
+    def index_at(self, elapsed_s: float) -> int:
+        if self.time.size == 0:
+            return 0
+        index = int(np.searchsorted(self.time, float(elapsed_s), side="right") - 1)
+        return min(max(index, 0), int(self.time.size) - 1)
+
     def sample(self, elapsed_s: float) -> ReferenceSample:
         if self.time.size == 0:
             return ReferenceSample(0.0, 0.0, 0.0, "empty")
-        index = int(np.searchsorted(self.time, float(elapsed_s), side="right") - 1)
-        index = min(max(index, 0), int(self.time.size) - 1)
+        index = self.index_at(elapsed_s)
         return ReferenceSample(
             position_cmd=float(self.position_cmd[index]),
             velocity_cmd=float(self.velocity_cmd[index]),
@@ -94,11 +99,38 @@ class MotorIdentificationResult:
     torque_pred: np.ndarray
     torque_target: np.ndarray
     sample_mask: np.ndarray
-    steady_state_mask: np.ndarray
+    identification_window_mask: np.ndarray
     tracking_ok_mask: np.ndarray
     saturation_ok_mask: np.ndarray
     train_mask: np.ndarray
     valid_mask: np.ndarray
+    train_rmse: float
+    valid_rmse: float
+    train_r2: float
+    valid_r2: float
+    valid_sample_ratio: float
+    sample_count: int
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MotorDynamicIdentificationResult:
+    motor_id: int
+    motor_name: str
+    identified: bool
+    fc: float
+    fs: float
+    vs: float
+    sigma0: float
+    sigma1: float
+    sigma2: float
+    offset: float
+    torque_pred: np.ndarray
+    torque_target: np.ndarray
+    sample_mask: np.ndarray
+    train_mask: np.ndarray
+    valid_mask: np.ndarray
+    validation_warmup_mask: np.ndarray
     train_rmse: float
     valid_rmse: float
     train_r2: float
